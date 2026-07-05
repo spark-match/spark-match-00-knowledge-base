@@ -161,7 +161,7 @@ graph TB
 
 ---
 
-### 2. Diagrama de Flujo de Datos (Request / Response Completo)
+### 2. Diagrama de Flujo de Datos (Request / Response Completo) #TODO: corregir
 
 Este diagrama muestra el ciclo completo de una consulta desde el usuario hasta respuesta con ranking:
 
@@ -265,7 +265,6 @@ sequenceDiagram
             deactivate Feedback
             
             Orchs->>API: ChatResponse<br/>{status: success,<br/>bot_message: follow_up,<br/>requires_follow_up: true}
-            deactivate Orchs
             activate API
             API-->>Frontend: JSON
             deactivate API
@@ -274,7 +273,7 @@ sequenceDiagram
             Frontend->>User: "¿Hay región donde prefieras...?"
             deactivate Frontend
             
-            Note over User,Feedback: Usuario responde<br/>Vuelve a FASE 2
+            note over User,Feedback: Usuario responde<br/>Vuelve a FASE 2
         end
     else RAMA B: Información Suficiente
         rect rgb(200, 255, 200)
@@ -333,7 +332,6 @@ sequenceDiagram
         rect rgb(200, 255, 230)
             note over Orchs,User: FASE 8: RESPUESTA AL USUARIO
             Orchs-->>API: ChatResponse<br/>{status: success,<br/>ranking.top_3: [...],<br/>rag_available_for: [...],<br/>ranking_id: ...}
-            deactivate Orchs
             activate API
             API-->>Frontend: JSON
             deactivate API
@@ -343,6 +341,7 @@ sequenceDiagram
             deactivate Frontend
         end
     end
+    deactivate Orchs
 
     rect rgb(255, 200, 200)
         note over Frontend,DB: FASE 9: VALIDACIÓN DE USUARIO (FEEDBACK)
@@ -373,7 +372,7 @@ sequenceDiagram
 
 ---
 
-### 3. Diagrama de Flujo de Datos (Data Pipeline)
+### 3. Diagrama de Flujo de Datos (Data Pipeline) - TODO: Corregir
 
 Este diagrama muestra cómo los datos viajan a través del pipeline batch:
 
@@ -465,7 +464,7 @@ stateDiagram-v2
     
     SessionActive --> ChatLoop: Entra en ciclo<br/>conversacional
     
-    ChatLoop --> TurnN: Turn N: Usuario envía<br/>mensaje/consulta
+    ChatLoop --> TurnN: Turn N - Usuario envía<br/>mensaje/consulta
     
     TurnN --> LLMInterpret: LLM interpreta<br/>+ calcula confidence
     
@@ -515,117 +514,117 @@ Este diagrama muestra la relación entre modelos de datos principales:
 ```mermaid
 classDiagram
     class SessionContext {
-        session_id: UUID
-        created_at: datetime
-        last_activity: datetime
-        conversation_turns: list[Turn]
-        user_profile: UserProfile
-        confidence_score: float [0,1]
-        missing_info: list[str]
-        dialogue_state: str
+        +UUID session_id
+        +datetime created_at
+        +datetime last_activity
+        +list~Turn~ conversation_turns
+        +UserProfile user_profile
+        +float confidence_score_0_1
+        +list~str~ missing_info
+        +str dialogue_state
     }
     
     class Turn {
-        turn_number: int
-        message: str
-        role: str (user|bot)
-        timestamp: datetime
+        +int turn_number
+        +str message
+        +str role_user_or_bot
+        +datetime timestamp
     }
     
     class UserProfile {
-        interests: list[str]
-        salary_priority: float [0,1]
-        cost_sensitivity: float [0,1]
-        admission_tolerance: float [0,1]
-        geographic_preference: str | null
-        institution_type_preference: str | null
-        confidence_score: float [0,1]
+        +list~str~ interests
+        +float salary_priority_0_1
+        +float cost_sensitivity_0_1
+        +float admission_tolerance_0_1
+        +str geographic_preference
+        +str institution_type_preference
+        +float confidence_score_0_1
     }
     
     class InterpretationResult {
-        interests: list[str]
-        salary_priority: float
-        cost_sensitivity: float
-        admission_tolerance: float
-        geographic_preference: str | null
-        institution_type_preference: str | null
-        missing_info: list[str]
-        confidence_score: float
-        suggested_follow_up: str | null
-        weights_generated: dict
+        +list~str~ interests
+        +float salary_priority
+        +float cost_sensitivity
+        +float admission_tolerance
+        +str geographic_preference
+        +str institution_type_preference
+        +list~str~ missing_info
+        +float confidence_score
+        +str suggested_follow_up
+        +dict weights_generated
     }
     
     class RankingItem {
-        rank: int (1,2,3)
-        career: str
-        institution: str
-        concordancia_score: float [0,1]
-        scores_by_criterion: ScoreByCriterion
-        verifiable_data: VerifiableData
-        explanation: str
+        +int rank_1_2_3
+        +str career
+        +str institution
+        +float concordancia_score_0_1
+        +ScoreByCriterion scores_by_criterion
+        +VerifiableData verifiable_data
+        +str explanation
     }
     
     class ScoreByCriterion {
-        affinity: float [0,1]
-        salary: float [0,1]
-        cost: float [0,1]
-        admission: float [0,1]
+        +float affinity_0_1
+        +float salary_0_1
+        +float cost_0_1
+        +float admission_0_1
     }
     
     class VerifiableData {
-        monthly_income: float
-        annual_cost: float
-        admission_rate: float
-        duration_years: int
+        +float monthly_income
+        +float annual_cost
+        +float admission_rate
+        +int duration_years
     }
     
     class FeedbackRecord {
-        session_id: UUID
-        ranking_id: UUID
-        timestamp_query: datetime
-        user_input: dict
-        profile_interpreted: UserProfile
-        weights_generated: dict
-        ranking_generated: list[RankingItem]
-        user_validation: Validation
-        reproducibility_metadata: Metadata
+        +UUID session_id
+        +UUID ranking_id
+        +datetime timestamp_query
+        +dict user_input
+        +UserProfile profile_interpreted
+        +dict weights_generated
+        +list~RankingItem~ ranking_generated
+        +Validation user_validation
+        +Metadata reproducibility_metadata
     }
     
     class Validation {
-        validation_score: int [1,5]
-        selected_career: str | null
-        timestamp_validation: datetime
-        notes: str | null
+        +int validation_score_1_5
+        +str selected_career
+        +datetime timestamp_validation
+        +str notes
     }
     
     class Metadata {
-        dataset_snapshot_id: str
-        config_snapshot_id: str
-        prompt_version: str
-        llm_model_used: str
-        timestamp: datetime
+        +str dataset_snapshot_id
+        +str config_snapshot_id
+        +str prompt_version
+        +str llm_model_used
+        +datetime timestamp
     }
     
     class Feature {
-        career: str
-        institution: str
-        income_score: float [0,1]
-        cost_score: float [0,1]
-        duration_score: float [0,1]
-        admission_score: float [0,1]
-        imputation_flags: dict
+        +str career
+        +str institution
+        +float income_score_0_1
+        +float cost_score_0_1
+        +float duration_score_0_1
+        +float admission_score_0_1
+        +dict imputation_flags
     }
     
-    SessionContext -->|"contiene"| Turn
-    SessionContext -->|"contiene"| UserProfile
-    InterpretationResult -->|"produce"| UserProfile
-    UserProfile -->|"junto con features"| RankingItem
-    RankingItem -->|"contiene"| ScoreByCriterion
-    RankingItem -->|"contiene"| VerifiableData
-    FeedbackRecord -->|"agrupa"| RankingItem
-    FeedbackRecord -->|"contiene"| Validation
-    FeedbackRecord -->|"contiene"| Metadata
-    Feature -->|"normaliza"| ScoreByCriterion
+    SessionContext --> Turn : contiene
+    SessionContext --> UserProfile : contiene
+    InterpretationResult --> UserProfile : produce
+    UserProfile --> RankingItem : junto con features
+    RankingItem --> ScoreByCriterion : contiene
+    RankingItem --> VerifiableData : contiene
+    FeedbackRecord --> RankingItem : agrupa
+    FeedbackRecord --> Validation : contiene
+    FeedbackRecord --> Metadata : contiene
+    Feature --> ScoreByCriterion : normaliza
 ```
 
 ---
@@ -716,7 +715,7 @@ graph LR
 
 ---
 
-### 7. Diagrama de Flujo de Autenticación y Sesión
+### 7. Diagrama de Flujo de Autenticación y Sesión - TODO: corregir
 
 Este diagrama detalla cómo funciona el sistema de tokens y sesiones:
 
@@ -774,15 +773,15 @@ sequenceDiagram
             activate SessionMgr
             SessionMgr-->>API: SessionContext{...}
             deactivate SessionMgr
-            Note over API: Continúa procesamiento<br/>/chat
+            note over API: Continúa procesamiento<br/>/chat
         else Session inválida
             API->>API: Retorna HTTP 401
             API-->>Frontend: {status: 401, detail: "Unauthorized"}
-            deactivate API
             Frontend->>Frontend: Limpia localStorage
             Frontend->>Browser: Redirige a inicio
             Browser->>Browser: Debe crear nueva sesión
         end
+        deactivate API
     end
 
     rect rgb(255, 220, 200)
@@ -790,14 +789,20 @@ sequenceDiagram
         par Usuario cierra sesión explícita
             Browser->>Frontend: Click "Cerrar sesión"
             Frontend->>API: POST /session/logout<br/>+ session_token
+            activate API
             API->>Auth: revoke_token(token)
+            activate Auth
             Auth->>ServerMemory: Marca token revocado
             Auth-->>API: OK
+            deactivate Auth
             API-->>Frontend: Éxito
+            deactivate API
             Frontend->>Browser: localStorage.removeItem('session_token')
         and Timeout automático (8 horas inactividad)
             ServerMemory->>Auth: Garbage collection<br/>verifica expirations
+            activate Auth
             Auth->>ServerMemory: Elimina tokens expirados
+            deactivate Auth
             note over Auth: En siguiente request<br/>con token expirado:<br/>validate_token() → None
         end
     end
@@ -814,7 +819,6 @@ sequenceDiagram
         note over Browser: 8. Usuario ve resultado
     end
 
-    style ServerMemory fill:#ffccbc
 ```
 
 ---
