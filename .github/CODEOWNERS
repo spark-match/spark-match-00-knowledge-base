@@ -2,33 +2,76 @@
 
 > Define quién revisa los PRs en cada área del repositorio.
 > Los reviewers son notificados automáticamente cuando un PR toca archivos bajo su responsabilidad.
+>
+> **Reglas de matching**: la última coincidencia gana. Ver https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
 
-# Orden importa: la última coincidencia gana
-# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+# =============================================================================
+# Catch-all: cualquier archivo no listado abajo
+# El team `members` contiene a TODOS los miembros de la org, por lo que
+# cualquier PR auto-solicita review a uno o más miembros del team.
+# =============================================================================
+*                                          @spark-match/members
 
-# Owners por defecto para todo el repositorio
-*                                          @spark-match/devops
+# =============================================================================
+# Onboarding — material para nuevos miembros
+# Requiere aprobación de product-owners (curación de contenido de bienvenida)
+# =============================================================================
+/onboarding/                               @spark-match/product-owners @spark-match/members
 
-# Onboarding
-/onboarding/                               @spark-match/product-owners @spark-match/devops
+# =============================================================================
+# Decisiones cross-team (ADRs organizacionales)
+# Requiere aprobación de product-owners (decisiones afectan a la org completa)
+# =============================================================================
+/decisions/                                @spark-match/product-owners @spark-match/members
 
-# Decisiones cross-team (ADRs)
-/decisions/                                @spark-match/product-owners @spark-match/devops
+# =============================================================================
+# Arquitectura — documentos de diseño
+# Revisión más estricta: requiere CODEOWNER de devops
+# =============================================================================
+/architecture/                              @spark-match/devops @spark-match/members
 
-# Arquitectura (revisiones más estrictas)
-/architecture/                              @spark-match/devops
+# =============================================================================
+# Postmortems — análisis de incidentes
+# Revisión por el equipo DevOps (responsable de remediación)
+# =============================================================================
+/postmortems/                              @spark-match/devops @spark-match/members
 
-# Postmortems (revisiones por el equipo DevOps)
-/postmortems/                              @spark-match/devops
+# =============================================================================
+# Investigación — papers, spikes, comparativas
+# Revisión flexible: ai-devs o cualquier miembro
+# =============================================================================
+/research/                                 @spark-match/ai-devs @spark-match/members
 
-# Investigación (revisiones flexibles)
-/research/                                 @spark-match/ai-devs @spark-match/devops
-
-# Documentación raíz (README, CONTRIBUTING, INDEX, LICENSE)
+# =============================================================================
+# Documentación raíz — archivos sensibles
+# Cambios al README/CONTRIBUTING/INDEX/LICENSE afectan a TODA la org.
+# Requiere aprobación de product-owners.
+# =============================================================================
 /README.md                                 @spark-match/product-owners
 /CONTRIBUTING.md                           @spark-match/product-owners
 /INDEX.md                                  @spark-match/product-owners
 /LICENSE                                   @spark-match/product-owners
 
-# Configuración de GitHub
+# =============================================================================
+# Configuración de GitHub — CODEOWNERS, workflows, templates
+# Cambios en CI/CD requieren revisión de devops.
+# =============================================================================
 /.github/                                  @spark-match/devops
+/.github/CODEOWNERS                        @spark-match/devops @spark-match/product-owners
+
+# =============================================================================
+# Notas operativas
+# =============================================================================
+# 1. El team `@spark-match/members` es un catch-all que incluye a TODOS
+#    los miembros actuales de la organización. Cuando un PR toca un path
+#    sin owner específico, GitHub asigna reviewers de este team.
+#
+# 2. Para añadir un nuevo miembro a la org, agregarlo también al team
+#    `members` con: gh api -X PUT orgs/spark-match/teams/members/memberships/<user> -f role=member
+#
+# 3. Para que un CODEOWNER específico tenga efecto, el team (o usuario)
+#    debe tener al menos acceso READ al repositorio.
+#
+# 4. Los CODEOWNERS listados en una sección más específica GANAN sobre
+#    el catch-all (`*`) por la regla de "última coincidencia".
+# =============================================================================
