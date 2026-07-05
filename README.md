@@ -86,3 +86,4 @@ MIT — ver [`LICENSE`](./LICENSE).
 ---
 
 > _"Si no está documentado, no existe."_ — Dicho popular del equipo Spark Match 🌟
+<!-- codeowners-validation-test: este comentario se revertirá después de validar -->
