@@ -1,10 +1,9 @@
 # reglas-negocio-agente.md
 
-> **Status**: 🟡 draft — en construcción, pendiente de validación en reunión de flujo.
-> **Autora**: @Fabiola (QA / documentación) · **Fecha**: 2026-07-05
+> **Status**: 🟡 draft 
+> **Fecha**: 2026-07-05
 > **Audiencia**: AI Devs, Backend, Data Engineers
 > Documento que fija el **flujo del agente** y las **reglas de negocio del scoring** para que
-> Backend (Ángel) y Datos (Nikolai) implementen sin adivinar. Complementa y actualiza
 > `2_requirements.md` y `3_design.md` en los puntos donde el diseño evolucionó (ver §7).
 
 ---
@@ -123,7 +122,8 @@ ranking con la información disponible (degradación controlada).
 | B1 | Al elegir una carrera, ordena de más a menos importante: (a) el sueldo que podrías ganar, (b) lo que cuesta estudiarla, (c) que sea lo que te apasiona, (d) qué tan fácil es entrar. | ranking base de pesos |
 | B2 | ¿Estarías dispuesto a invertir más si la carrera te asegura mejores ingresos? | relación costo ↔ ingreso |
 | B3 | ¿Qué tan importante es que te guste, aunque pague menos? | afinidad vs ingreso |
-| B4 | ¿Te animarías a una carrera muy selectiva/difícil de entrar, o prefieres opciones más accesibles? | tolerancia a admisión |
+| B4 | ¿Te animarías a una carrera muy selectiva/difícil de ingresar a la universidad/instituto, o prefieres opciones más accesibles? | tolerancia a admisión |
+| B5 | ¿Que tan importante es la duracion de la carrera? | duracion |
 
 **Salida del bloque:** `w_afinidad, w_ingreso, w_costo, w_admision` (normalizados a suma 1).
 
@@ -132,9 +132,8 @@ ranking con la información disponible (degradación controlada).
 | # | Pregunta guía | Alimenta |
 |---|---|---|
 | C1 | ¿En qué región o ciudad quieres estudiar, o te da igual? | `region` (georreferencia) |
-| C2 | ¿Universidad pública, privada o indistinto? | `tipo_institucion` |
-| C3 | ¿Tienes un tope de mensualidad o presupuesto? | `presupuesto_max` |
-| C4 | *(opcional MVP)* ¿Presencial o virtual? | `modalidad` |
+| C2 | ¿Universidad pública, privada o indistinto? | `tipo_gestion` |
+| C3 | ¿Universidad , instituto o indistinto? | `tipo_institucion` |
 
 ---
 
@@ -150,7 +149,7 @@ ranking con la información disponible (degradación controlada).
 5. **Umbral / repreguntas:** ranking solo con 6 RIASEC + 4 pesos presentes; máximo 4 repreguntas.
 6. **Desempate:** ante scores iguales (diff < 0.001), orden alfabético por institución (heredado
    de `3_design.md`).
-7. **Salida:** Top-N (default N=3) con datos verificables (ingreso, costo, tasa de admisión) y una
+7. **Salida:** Top-N (default N=5) con datos verificables (ingreso, costo, tasa de admisión) y una
    explicación por recomendación.
 
 ---
