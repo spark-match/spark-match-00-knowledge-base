@@ -1,9 +1,5 @@
 # CODEOWNERS — Spark Match Knowledge Base
 
-> Define quién revisa los PRs en cada área del repositorio.
-> Los reviewers son notificados automáticamente cuando un PR toca archivos bajo su responsabilidad.
->
-> **Reglas de matching**: la última coincidencia gana. Ver https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
 
 # =============================================================================
 # Catch-all: cualquier archivo no listado abajo
