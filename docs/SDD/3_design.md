@@ -217,7 +217,7 @@ class EmbeddingService:
 
 **Notas de comportamiento:**
 - EmbeddingService es **inyectable** en RAG_Module (para pgvector search).
-- Para afinidad RIASEC, **no se usa embedding**; se usa peso posicional directo (§4.2).
+- Para afinidad RIASEC, **no se usa embedding**; se usa peso posicional directo (ver `### Algoritmos` → `#### Algoritmo 2: Cálculo de Afinidad RIASEC`).
 - Si Bedrock falla, degradación controlada: RAG desactivado, flujo principal sin cambios.
 
 ---
@@ -3253,7 +3253,7 @@ def test_determinism():
 
 ---
 
-### Propiedad 2: Validez de Pesos
+### Propiedad 6: Validez de Pesos
 
 **Invariante:** Pesos siempre cumplen: cada wᵢ ∈ [0,1] AND Σwᵢ ∈ [0.99, 1.01]
 
@@ -3272,7 +3272,7 @@ def test_weights_validity():
 
 ---
 
-### Propiedad 3: Aislamiento de Sesión
+### Aislamiento de Sesión
 
 **Invariante:** Usuario A NO accede datos de usuario B, incluso si B es atacante.
 
