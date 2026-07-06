@@ -236,7 +236,7 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - Invariante: pesos resultantes siempre cumplen: cada wᵢ ∈ [0,1] AND suma ∈ [0.99, 1.01].
 
 - [ ] 7. Checkpoint Fase 1 — Validación de Fundación
-  - [ ] 7.1 Ejecutar suite `pytest data_pipeline/ tests/test_scoring.py --cov` con fixture reducido (50 carreras, 10 semilla RIASEC).
+  - [ ] 7.1 Ejecutar suite `uv run pytest data_pipeline/ tests/test_scoring.py --cov` con fixture reducido (50 carreras, 10 semilla RIASEC).
     - Verificar que `DataIngestion.download()` retorna path válido (o fallback si portal no disponible).
     - Verificar que `DataCleaner.clean()` retorna DataFrame válido sin filas incompletas.
     - Verificar que `FeatureEngineer.run_pipeline()` genera `features.csv` con 4 columnas `*_norm` en `[0,1]`.
@@ -455,7 +455,7 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - `scores_by_criterion` con 5 criterios.
     - `datos_verificables` con números reales.
     - `explicacion` non-empty.
-  - [ ] 12.4 Ejecutar suite: `pytest tests/test_*.py tests/integration/ --cov`.
+  - [ ] 12.4 Ejecutar suite: `uv run pytest tests/test_*.py tests/integration/ --cov`.
     - Cobertura ≥ 60% en `backend/llm_service.py`, `backend/session.py`, `backend/orchestration.py`, `backend/app.py`.
     - Todos los tests de propiedades (1, 5, 6) deben pasar.
 
@@ -648,7 +648,7 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - Crear 2 sesiones distintas.
     - Session A: feedback sobre carrera X.
     - Session B: consultar feedback → no ve datos de Session A.
-  - [ ] 20.3 Ejecutar suite: `pytest tests/ --cov`.
+  - [ ] 20.3 Ejecutar suite: `uv run pytest tests/ --cov`.
     - Cobertura ≥ 60% en `backend/persistence/`, `backend/lambda/`, `backend/auth.py`.
     - Propiedades de corrección (3 — Aislamiento, 4 — Reproducibilidad) deben pasar.
 
@@ -862,7 +862,7 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
 - [ ] 29. Checkpoint Final — Validación Integral del Sistema
   - [ ] 29.1 Ejecutar suite completa:
     ```bash
-    pytest tests/ --cov --cov-report=html
+    uv run pytest tests/ --cov --cov-report=html
     ```
     - Cobertura ≥ 60% en `backend/`, `data_pipeline/`.
     - Todos los tests pasan (unit + integration).
