@@ -36,7 +36,7 @@ ADRs (Architecture Decision Records) cross-team. Decisiones que afectan a toda l
 
 | Documento | Autor | Fecha | Audiencia | Status |
 |---|---|---|---|---|
-| _(vacío — añade el primero)_ | — | — | — | — |
+| [ADR-001: Backend híbrido (Lambda + servidor agente)](./decisions/ADR-001-backend-hibrido-lambda-mas-agente.md) | @Angel, @Fabiola | 2026-07-05 | Backend, AI Devs | 🟡 |
 
 ---
 
@@ -87,16 +87,18 @@ Material de bienvenida para nuevos miembros.
 ## 🗺️ Mapa por equipo
 
 ### Backend Devs
-- _(ningún doc por ahora)_
+- [ADR-001: Backend híbrido (Lambda + servidor agente)](./decisions/ADR-001-backend-hibrido-lambda-mas-agente.md)
+- [Reglas de negocio del agente y scoring](./docs/SDD/4_reglas-negocio-agente.md)
 
 ### Frontend Devs
-- _(ningún doc por ahora)_
+- [Reglas de negocio del agente y scoring](./docs/SDD/4_reglas-negocio-agente.md)
 
 ### AI Devs
-- _(ningún doc por ahora)_
+- [Reglas de negocio del agente y scoring](./docs/SDD/4_reglas-negocio-agente.md)
+- [ADR-001: Backend híbrido (Lambda + servidor agente)](./decisions/ADR-001-backend-hibrido-lambda-mas-agente.md)
 
 ### Data Engineers
-- _(ningún doc por ahora)_
+- [Reglas de negocio del agente y scoring](./docs/SDD/4_reglas-negocio-agente.md) — §7 esquema de `features.csv`
 
 ### DevOps
 - [Plantilla de ADR](./templates/adr.md)
@@ -106,7 +108,7 @@ Material de bienvenida para nuevos miembros.
 - [Setup del entorno de desarrollo](./onboarding/dev-setup.md)
 
 ### QA
-- _(ningún doc por ahora)_
+- [Reglas de negocio del agente y scoring](./docs/SDD/4_reglas-negocio-agente.md)
 
 ### Product Owners
 - [Bienvenida a Spark Match](./onboarding/welcome.md)
@@ -122,10 +124,10 @@ _(se actualizará conforme se añadan docs con front-matter)_
 
 ## 📊 Estadísticas
 
-- **Documentos totales**: 6 (4 plantillas + 2 onboarding)
+- **Documentos totales**: 8 (4 plantillas + 2 onboarding + 1 ADR + 1 SDD reglas)
 - **Documentos por status**:
   - 🟢 published: 6
-  - 🟡 draft: 0
+  - 🟡 draft: 2
   - 🔴 archived: 0
 
-> _Última actualización: 2026-07-04 (creación del repositorio)_
+> _Última actualización: 2026-07-05 (ADR-001 + reglas de negocio del agente)_
