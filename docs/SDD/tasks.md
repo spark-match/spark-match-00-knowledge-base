@@ -899,7 +899,7 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
 
 - El prefijo `(Opcional)` en una subtarea indica que es trabajo no bloqueante para el progreso funcional del MVP — no es requerido para demostración o cierre de fase. Los **tests de corrección y de integración NO son opcionales** salvo que se marquen explícitamente; son obligatorios y validan que el sistema cumple con especificaciones críticas.
 
-- Cada subtarea de implementación termina con `_Requerimientos: X.Y_` (ej `_Requerimientos: 1.2, 4.1_`), referenciando criterios en `design.md` § 11 (Requisitos). Este mapeo asegura trazabilidad: cualquier criterio de requerimiento aparece en al menos una subtarea del plan. Los checkpoints y tareas organizativas pueden no tener trazabilidad directa.
+- Cada subtarea de implementación termina con `_Requerimientos: X.Y_` (ej `_Requerimientos: 1.2, 4.1_`), referenciando criterios en `design.md` § 3 (Requisitos). Este mapeo asegura trazabilidad: cualquier criterio de requerimiento aparece en al menos una subtarea del plan. Los checkpoints y tareas organizativas pueden no tener trazabilidad directa.
 
 - **Property-based testing** usa librería `hypothesis`:
   - **Propiedad 1**: Generador de `(weights, features_df)` válidos; invariante: ejecutar 2 veces → mismo ranking.
@@ -907,7 +907,7 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
   - **Propiedad 6**: Generador de rankings aleatorios (5 elementos); invariante: pesos suma ∈ [0.99, 1.01].
   - **Propiedad 4**: Snapshot + config fijos; ejecutar en 2 procesos; invariante: `ranking_json` idéntico byte-a-byte.
 
-- **Restricciones transversales** (heredadas de `design.md` § 14):
+- **Restricciones transversales** (heredadas de `design.md` § Restricciones Transversales):
   - Package manager: `uv` (NO Poetry, NO Conda, NO pip puro).
   - Framework Fargate: `FastAPI` + `Uvicorn` (NO Flask, NO Django).
   - Framework Lambda: `boto3` puro (NO frameworks adicionales como `zappa`).
