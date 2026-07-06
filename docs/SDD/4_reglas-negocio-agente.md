@@ -70,7 +70,7 @@ Los 4 pesos son **por persona**:
 |---|---|---|
 | `afinidad_norm` | Ajuste vocacional perfil ↔ carrera | Perfil RIASEC del estudiante × código RIASEC de la carrera |
 | `ingreso_norm` | Ingreso esperado del egresado | Ponte en Carrera (MINEDU) → `features.csv` |
-| `costo_norm` | Costo de la carrera (mensualidad / ingreso) | Ponte en Carrera / catálogo universidad |
+| `costo_norm` | Costo de la carrera (costo **anual** / ingreso) | Ponte en Carrera / catálogo universidad |
 | `selectividad_norm` | Qué tan difícil es entrar (tasa de admisión) | Ponte en Carrera / dato universidad |
 
 > **Afinidad (RIASEC):** el agente ya calcula el código Holland de 3 letras del estudiante y lo
@@ -166,26 +166,35 @@ Ya soportados por el POC (`StudentProfile`): 6 scores RIASEC, `riasec_code`, `in
 `strengths`, `preferred_fields`, `dislikes`, identidad básica.
 
 **Faltan (añadir):** `w_afinidad`, `w_ingreso`, `w_costo`, `w_admision`, `region`,
-`tipo_institucion`, `presupuesto_max`, `modalidad`.
+`tipo_gestion` (pública/privada), `tipo_institucion` (universidad/instituto),
+`presupuesto_anual` (S/. / año — el filtro de presupuesto de la UI es **anual**), `modalidad`.
 
 ### 7.2 Campos por carrera/universidad → define `features.csv` (repo 05, Nikolai)
 
 El catálogo actual del POC solo tiene `riasec_profile`, `skills`, `field`, `outlook`.
 **No tiene ni un campo económico ni geográfico.** Para el scoring hacen falta:
 
-| Campo | Tipo | Fuente | Uso |
-|---|---|---|---|
-| `career_id` / `career_name` | str | catálogo | id |
-| `institution` | str | catálogo/SUNEDU | universidad |
-| `riasec_profile` | str (3 letras) | catálogo | afinidad |
-| `ingreso_promedio` | num (S/. / mes) | Ponte en Carrera | `ingreso_norm` |
-| `costo_mensualidad` | num (S/.) | Ponte en Carrera / universidad | `costo_norm` |
-| `tasa_admision` | num (%) | Ponte en Carrera / universidad | `selectividad_norm` |
-| `region` | str | universidad / georef | filtro C1 |
-| `tipo_institucion` | enum (pública/privada) | universidad | filtro C2 |
-| `duracion_anios` | num | catálogo | dato verificable |
+| Campo | Tipo | Fuente | Uso | En la UI (Figma) |
+|---|---|---|---|---|
+| `career_id` / `career_name` | str | catálogo | id | Título de la tarjeta |
+| `institution` | str | catálogo/SUNEDU | universidad (**dato central** de cada tarjeta del reporte) | Subtítulo (ej. "U. Nacional Mayor de San Marcos") |
+| `riasec_profile` | str (3 letras) | catálogo | afinidad | "% match" |
+| `ingreso_promedio` | num (S/. / **mes**) | Ponte en Carrera | `ingreso_norm` | "Ingreso Mensual Prom." |
+| `costo_anual` | num (S/. / **año**) | Ponte en Carrera / universidad | `costo_norm` | "Costo Anual" |
+| `tasa_admision` | num (%) | Ponte en Carrera / universidad | `selectividad_norm` | "Tasa de Admisión" |
+| `region` | str | universidad / georef | filtro C1 | Filtro "Región de estudio" |
+| `tipo_gestion` | enum (pública/privada) | universidad | filtro C2 | Filtro "Tipo de universidad" |
+| `tipo_institucion` | enum (universidad/instituto) | catálogo/SUNEDU | filtro C3 | — (pendiente en UI) |
+| `duracion_anios` | num | catálogo | dato verificable | "Duración" |
 
 > Normalización sugerida: min-max por columna sobre el dataset → todo a `[0, 1]`.
+>
+> **Alineación con la UI (Figma `04-frontend`):** las columnas de arriba se validaron contra la
+> tarjeta del reporte del diseño. Ojo con las **unidades**: el ingreso es **mensual** y el costo es
+> **anual** (así los muestra la UI); el filtro de presupuesto del estudiante también es **anual**,
+> por lo que debe compararse contra `costo_anual`. `tipo_gestion` (pública/privada) y
+> `tipo_institucion` (universidad/instituto) son filtros distintos (Bloque C, C2 y C3) — no
+> confundirlos.
 
 ---
 
