@@ -1,627 +1,839 @@
-# design.md
+# design.md — CareerMatch Perú (Consolidado, foco AWS)
 
-## Descripción General
+## 1. Descripción General
 
-CareerMatch Perú es un sistema de recomendación de carreras universitarias que opera mediante un asistente conversacional basado en LLM, integrado con un motor de evaluación multi-criterio transparente y auditable. El flujo principal es: 
+**CareerMatch Perú** es un sistema de recomendación de carreras universitarias que opera mediante un asistente conversacional basado en LLM, integrado con un motor de evaluación multi-criterio determinístico y auditable. El flujo principal es:
 
-(1) usuario inicia sesión autenticada, 
+1. Usuario inicia sesión autenticada vía JWT.
+2. Expresa preferencias en lenguaje natural a través de interfaz web conversacional.
+3. El **LLM_Layer** (Amazon Bedrock/Claude) interpreta preferencias y detecta información incompleta en 3 bloques:
+   - **Bloque A**: RIASEC (6 dimensiones Holland)
+   - **Bloque B**: Pesos dinámicos (5 criterios: afinidad, ingreso, costo, admisión, duración)
+   - **Bloque C**: Filtros duros (región, tipo institución, presupuesto, modalidad)
+4. Si falta información, el sistema genera preguntas contextuales iterativamente hasta alcanzar confianza ≥ 0.70 o máximo 4 repreguntas.
+5. Una vez interpretadas, el **Scoring_Engine** calcula indicadores de concordancia multi-criterio para todas las combinaciones carrera–universidad, ordena por score descendente y retorna **Top-5**.
+6. El **LLM_Layer** redacta explicaciones personalizadas.
+7. El usuario valida con escala Likert y la sesión se persiste en **Feedback_Storage** para análisis futuro.
 
-(2) expresa preferencias en lenguaje natural a través de interfaz web conversacional, 
-
-(3) el **LLM_Layer** interpreta preferencias y detecta información incompleta, 
-
-(4) si falta información, el sistema genera preguntas contextuales iterativamente hasta alcanzar confianza >= 0.70, 
-
-(5) una vez interpretadas, el **Scoring_Engine** calcula indicadores de concordancia multi-criterio para todas las combinaciones carrera–universidad, ordena por score descendente y retorna Top-3, 
-
-(6) el **LLM_Layer** redacta explicaciones personalizadas,
-
-(7) el usuario valida con escala Likert y la sesión se persiste en **Feedback_Storage** para análisis futuro.   
-
-El diseño enfatiza determinismo (cualquier input idéntico genera ranking idéntico), reproducibilidad (snapshots versionados permiten auditar exactamente qué datos y configuración se usó), aislamiento de datos por `session_id`, y degradación controlada (si componentes fallan, el sistema retorna mejor respuesta posible con información disponible). La arquitectura es modular, permitiendo reemplazo de componentes (p.ej., método de afinidad, estrategia de scoring, proveedor LLM) sin afectar otros.
-
----
-
-## Arquitectura
-
-### Diagrama de Componentes
-
-```mermaid
-graph TD
-    User["👤 Usuario"]
-    WebUI["Web_Interface<br/>(HTML+JS+CSS)"]
-    
-    subgraph Backend["Backend (Python)"]
-        Orch["orchestration.py<br/>Orchestration_Layer"]
-        Auth["auth.py<br/>Auth_Service"]
-        Session["session.py<br/>Session_Manager"]
-        LLM["llm_service.py<br/>LLM_Layer"]
-        Scoring["scoring.py<br/>Scoring_Engine"]
-        RAG["rag.py<br/>RAG_Module"]
-        Feedback["feedback.py<br/>Feedback_Storage"]
-        Embedding["embedding.py<br/>Embedding_Service"]
-    end
-    
-    subgraph DataPipeline["Data Pipeline (Python)"]
-        Ingest["ingestion.py<br/>Descarga automatizada"]
-        Clean["data_clean.py<br/>Limpieza"]
-        Features["feature_engineering.py<br/>Normalización"]
-    end
-    
-    FeaturesCSV["data/features.csv<br/>Features normalizadas"]
-    ConfigJSON["data/feature_config.json<br/>Config imputación"]
-    SnapshotsRaw["snapshots/raw/<br/>Histórico crudos"]
-    SnapshotsFeats["snapshots/features/<br/>Histórico features"]
-    SnapshotsConfigs["snapshots/configs/<br/>Histórico configs"]
-    
-    ExternalPonte["https://ponte...minedu.gob.pe<br/>(Ponte en Carrera)"]
-    ExternalLLM["Gemini API / GPT<br/>(LLM externo)"]
-    ExternalEmbed["OpenAI / Google / HF<br/>(Embedding service)"]
-    VectorDB["Vector Database<br/>(FAISS/Chroma/Pinecone)"]
-    FeedbackDB["feedback.db<br/>SQLite/SQL"]
-    
-    User -->|"navega"| WebUI
-    WebUI -->|"HTTP + session_token"| Orch
-    Orch -->|"valida token"| Auth
-    Orch -->|"recupera/actualiza contexto"| Session
-    Orch -->|"interpreta preferencias"| LLM
-    Orch -->|"calcula ranking"| Scoring
-    Orch -->|"pregunta detalle"| RAG
-    Orch -->|"persiste feedback"| Feedback
-    
-    LLM -->|"call API"| ExternalLLM
-    LLM -->|"genera embeddings"| Embedding
-    Embedding -->|"call API"| ExternalEmbed
-    
-    Scoring -->|"carga features"| FeaturesCSV
-    Scoring -->|"consulta config"| ConfigJSON
-    RAG -->|"busca chunks"| VectorDB
-    RAG -->|"call LLM"| ExternalLLM
-    Feedback -->|"inserta registro"| FeedbackDB
-    
-    Ingest -->|"descarga"| ExternalPonte
-    Ingest -->|"guarda snapshot"| SnapshotsRaw
-    Ingest -->|"retorna raw.xlsx"| Clean
-    Clean -->|"retorna filtered.csv"| Features
-    Features -->|"normaliza"| FeaturesCSV
-    Features -->|"guarda snapshot"| SnapshotsFeats
-    Features -->|"guarda config"| ConfigJSON
-    ConfigJSON -->|"snapshot"| SnapshotsConfigs
-    
-    Orch -->|"retorna JSON"| WebUI
-    WebUI -->|"renderiza UI"| User
-```
-
-### Diagrama de Secuencia
-
-```mermaid
-sequenceDiagram
-    actor U as Usuario
-    participant WEB as Web_Interface
-    participant ORCH as Orchestration_Layer
-    participant AUTH as Auth_Service
-    participant SESS as Session_Manager
-    participant LLM as LLM_Layer
-    participant SCORE as Scoring_Engine
-    participant FB as Feedback_Storage
-    participant EXT as Ext Services<br/>(APIs)
-
-    U->>WEB: Accede a página inicial
-    WEB->>ORCH: POST /chat {message, session_token}
-    ORCH->>AUTH: Valida session_token
-    AUTH-->>ORCH: session_id válido
-    ORCH->>SESS: Recupera contexto(session_id)
-    SESS-->>ORCH: context{histórico, perfil_prev}
-    ORCH->>LLM: Interpreta(message + context)
-    LLM->>EXT: call Gemini API
-    EXT-->>LLM: interpretación JSON
-    LLM-->>ORCH: {interests, weights, confidence}
-    
-    alt confidence < 0.70
-        ORCH->>LLM: Genera pregunta seguimiento
-        LLM-->>ORCH: seguimiento conversacional
-        ORCH->>SESS: Actualiza perfil parcial
-        SESS-->>ORCH: OK
-        ORCH-->>WEB: Respuesta JSON {bot_message, requires_follow_up: true}
-        WEB-->>U: "¿Hay región donde prefieras...?"
-    else confidence >= 0.70
-        ORCH->>SCORE: Calcula ranking(pesos, features)
-        SCORE-->>ORCH: Top-3 {career, score, datos}
-        ORCH->>LLM: Genera explicación(Top-3, perfil)
-        LLM->>EXT: call Gemini API
-        EXT-->>LLM: explicaciones
-        LLM-->>ORCH: explicaciones_personalizadas
-        ORCH->>FB: Guarda consulta(session_id, ranking)
-        FB-->>ORCH: ranking_id
-        ORCH-->>WEB: {status: success, ranking, explanations}
-        WEB-->>U: Muestra Top-3 con datos
-        
-        U->>WEB: Valida: Likert score = 4
-        WEB->>ORCH: POST /feedback {ranking_id, score}
-        ORCH->>FB: Actualiza(ranking_id, validation)
-        FB-->>ORCH: OK
-        ORCH-->>WEB: {status: success}
-        WEB-->>U: "Feedback guardado"
-    end
-```
-
-### Diagrama de Flujo
-
-```mermaid
-flowchart TD
-    START["Inicio: Usuario envía consulta"]
-    VALIDATE["Valida session_token"]
-    VALID{Token válido?}
-    RETRIEVE["Recupera contexto sesión"]
-    INTERPRET["LLM interpreta preferencias"]
-    CALCCONF["Calcula confidence_score"]
-    CONF{confidence >= 0.70?}
-    FOLLOW["Genera pregunta seguimiento"]
-    TURNCOUNT{Turnos >= 4?}
-    SCORE["Motor scoring calcula ranking"]
-    EXPLAIN["LLM genera explicaciones"]
-    PERSIST["Persiste en Feedback_Storage"]
-    RETURN["Retorna respuesta JSON"]
-    ERROR401["Retorna HTTP 401"]
-    ERROR["Retorna HTTP 500"]
-    
-    START --> VALIDATE
-    VALIDATE --> VALID
-    VALID -->|No| ERROR401
-    VALID -->|Sí| RETRIEVE
-    RETRIEVE --> INTERPRET
-    INTERPRET --> CALCCONF
-    CALCCONF --> CONF
-    CONF -->|No| FOLLOW
-    FOLLOW --> TURNCOUNT
-    TURNCOUNT -->|No| RETURN
-    TURNCOUNT -->|Sí| SCORE
-    CONF -->|Sí| SCORE
-    SCORE --> EXPLAIN
-    EXPLAIN --> PERSIST
-    PERSIST --> RETURN
-    EXPLAIN -.->|Si falla| ERROR
-    RETURN --> END["Fin"]
-    ERROR401 --> END
-    ERROR --> END
-```
+**Énfasis en:**
+- **Determinismo**: Cualquier input idéntico genera ranking idéntico en 100% de ejecuciones.
+- **Reproducibilidad**: Snapshots versionados permiten auditar exactamente qué datos y configuración se usó.
+- **Aislamiento de datos** por `session_id`.
+- **Degradación controlada**: Si componentes fallan, el sistema retorna la mejor respuesta posible con información disponible.
+- **Arquitectura modular AWS**: Lambda (stateless) + Fargate (stateful agente) + Aurora PostgreSQL + DynamoDB.
 
 ---
 
-## Módulos y Interfaces
+## 2. Arquitectura de Componentes
 
-### `backend/auth.py` — Auth_Service
+### 2.1 Diagrama de Alto Nivel
 
-**Responsabilidad:** Crear, validar, almacenar y revocar tokens de sesión autenticados. Garantiza aislamiento de datos entre usuarios.
+```
+Cliente (browser)
+    ↓ (HTTP)
+API Gateway
+    ├→ Lambda: /session/create, /feedback, /universities       [stateless, CRUD]
+    └→ VPC Link → ALB → Fargate: /chat                         [stateful, agente]
 
-**API Pública:**
+Fargate Service (Deep Agent):
+    Orchestrator 
+      ├→ LLM_Layer (Bedrock/Claude-3.5-Sonnet)
+      ├→ Session_Manager (in-memory, TTL=1800s)
+      ├→ Scoring_Engine (determinístico, en-process)
+      └→ RAG_Module (opcional)
+           └→ Embedding_Service (Bedrock Titan Embeddings)
+                └→ pgvector (Aurora PostgreSQL)
+
+Persistencia:
+    ├→ Aurora PostgreSQL: feedback, rankings, pgvector (career_chunks)
+    └→ DynamoDB: universities (georreferencia, GSI por region)
+
+Pipeline de Datos (batch, EventBridge cron → AWS Batch/Fargate task):
+    Ingestion (Selenium, Ponte en Carrera)
+      → Data Clean
+      → Feature Engineering (normalización MinMax)
+      → RIASEC Tagging (Bedrock few-shot)
+      → features.csv (snapshot versionado)
+```
+
+### 2.2 Por qué Fargate (no Lambda) para el agente
+
+El loop conversacional requiere:
+- Múltiples llamadas a Bedrock por turno.
+- Mantener contexto en memoria entre turnos de la misma sesión.
+- Posible duración variable (4+ turnos).
+
+Lambda no es adecuado: timeout corto (15 min), stateless forzado, costo por llamada. **Fargate proporciona:**
+- Contenedor Python persistente.
+- Memoria en-process ilimitada (para sesiones).
+- Long polling / WebSocket support (para chat fluido).
+
+**Stateless (Lambda) mantiene:**
+- `/session/create` → JWT
+- `/feedback` → validaciones
+- `/universities` → lectura de GIS
+
+---
+
+## 3. Modelos de Datos
+
+### 3.1 `StudentProfile` (Bloque A, B, C)
 
 ```python
-class AuthService:
-    def create_session(self) -> tuple[str, str]:
-        """
-        Crea nueva sesión autenticada.
-        
-        Returns:
-            (session_id: UUID v4, session_token: criptográfico opaco)
-        
-        Comportamiento:
-        - Genera session_id único: UUID v4
-        - Genera session_token seguro: 32+ bytes de entropía (secrets.token_urlsafe)
-        - Token es opaco: no contiene información decibrable
-        - Token nunca es retornado al cliente sin estar en estructura de respuesta
-        
-        Errores:
-        - GeneralError si generación de entropía falla
-        """
-    
-    def validate_token(self, session_token: str) -> str | None:
-        """
-        Valida token y retorna session_id asociado.
-        
-        Args:
-            session_token: token a validar
-        
-        Returns:
-            session_id si válido, None si inválido o expirado
-        
-        Comportamiento:
-        - Verifica que token existe en almacén de tokens activos
-        - Verifica que no ha expirado (session_timeout_minutes)
-        - Retorna session_id asociado
-        - No falla con excepción; retorna None para inválido (HTTP 401)
-        
-        Fallback:
-        - Token expirado → None
-        - Token no existe → None
-        """
-    
-    def revoke_token(self, session_token: str) -> None:
-        """
-        Revoca token inmediatamente.
-        
-        Comportamiento:
-        - Marca token como revocado en almacén
-        - Limpia datos de contexto de sesión si lo hay
-        
-        Notas:
-        - No falla si token ya está revocado
-        """
-    
-    def is_token_valid(self, session_token: str) -> bool:
-        """Helper booleano para validación rápida."""
-    
-    def get_session_timeout_minutes(self) -> int:
-        """
-        Retorna duración configurada de sesión en minutos.
-        
-        Default: 480 (8 horas)
-        Configurable: variable entorno SESSION_TIMEOUT_MINUTES
-        """
+class StudentProfile:
+    # Bloque A — RIASEC (Etapa 1: gathering_info)
+    riasec_scores: dict[str, int]   # {"R":.., "I":.., "A":.., "S":.., "E":.., "C":..} [1,10]
+    riasec_code: str | None         # 3 letras, ej "RIA", calculado desde riasec_scores
+
+    # Bloque B — pesos dinámicos (Etapa 2), suman 1.0
+    w_afinidad: float     # [0,1], peso criterio afinidad RIASEC
+    w_ingreso: float      # [0,1], peso criterio ingresos esperados
+    w_costo: float        # [0,1], peso criterio costo
+    w_admision: float     # [0,1], peso criterio selectividad admisión
+    w_duracion: float     # [0,1], peso criterio duración en años
+
+    # Bloque C — filtros duros (no pesan, descartan)
+    region: str | None                  # Región de Perú (None = "me da igual")
+    tipo_institucion: str | None        # 'publica' | 'privada' | None
+    presupuesto_max: float | None       # Máximo costo anual (soles)
+    modalidad: str | None               # 'presencial' | 'virtual' | None
+
+    # Datos adicionales contextuales
+    interests: list[str]        # Áreas de interés mencionadas
+    strengths: list[str]        # Fortalezas percibidas
+    preferred_fields: list[str] # Campos específicos preferidos
+    dislikes: list[str]         # Áreas de rechazo
 ```
 
-**Notas de comportamiento:**
-- Token es almacenado en servidor (en memoria o cache; no en cliente).
-- Si token en cliente es compromised, no permite acceso a otros usuarios (session_id es único).
-- Revocación es inmediata: en siguiente request, token retorna 401.
+**Defaults:**
+- Si Bloque B no se prioriza tras 4 repreguntas: cada peso = `0.2` (suma 1).
+- Si usuario dice "no me importa X", ese peso = `0` y se re-normaliza el resto sumando 1.
 
----
+### 3.2 `CareerFeature` (fila de `features.csv`)
 
-### `backend/session.py` — Session_Manager
+| Campo | Tipo | Rango | Notas |
+|---|---|---|---|
+| `career_id` | str | — | Identificador único |
+| `career_name` | str | — | Nombre de carrera |
+| `institution` | str | — | Universidad que ofrece |
+| `riasec_profile` | str | 3 letras | Código Holland de la carrera (ej "RIA") |
+| `riasec_source` | enum | `seed` \| `llm_tagged` \| `family_fallback` \| `pending` | Trazabilidad del etiquetado |
+| `ingreso_norm` | float | [0,1] | `MinMax(log1p(ingreso_promedio))` |
+| `costo_norm` | float | [0,1] | `MinMax(log1p(costo_mensualidad))` |
+| `selectividad_norm` | float | [0,1] | `1 - MinMax(tasa_admision)` (mayor = más selectivo) |
+| `duracion_norm` | float | [0,1] | `MinMax(duracion_anios)` |
+| `region` | str | — | Región de la universidad |
+| `tipo_institucion` | enum | `publica` \| `privada` | Tipo de institución |
+| `duracion_anios` | float | — | Duración en años (dato verificable) |
+| `ingreso_promedio` | float | S/. / mes | Dato verificable del MINEDU |
+| `costo_mensualidad` | float | S/. | Dato verificable |
+| `tasa_admision` | float | % | Dato verificable |
 
-**Responsabilidad:** Mantener contexto conversacional multi-turno por sesión, actualizar perfil interpretado, rastrear confianza y estado de diálogo.
+### 3.3 `RankingItem`
 
-**API Pública:**
+```python
+class RankingItem:
+    career_id: str
+    career_name: str
+    institution: str
+    score: float                      # [0,1]
+    scores_por_criterio: dict         # {afinidad, ingreso, costo, admision, duracion} [0,1]
+    datos_verificables: dict          # {ingreso_promedio, costo_mensualidad, tasa_admision, duracion_anios}
+    explicacion: str                  # Generada por LLM_Layer
+```
+
+### 3.4 `SessionContext` (en memoria, Fargate)
 
 ```python
 class SessionContext:
-    """Modelo de contexto de sesión."""
     session_id: str
-    created_at: datetime
-    last_activity: datetime
-    conversation_turns: list[dict]  # [{turn: int, message: str, role: 'user'|'bot', timestamp}]
-    user_profile: UserProfile | None  # Definido en Modelos de Datos
-    confidence_score: float  # [0.0, 1.0]
-    missing_info: list[str]  # Campos del perfil que faltan
-    suggested_follow_up: str | None  # Pregunta conversacional generada
-    dialogue_state: str  # 'gathering_info' | 'ready_for_recommendation'
-    ranking_history: list[dict]  # Histórico de rankings generados
+    profile: StudentProfile
+    conversation_history: list[dict]      # [{role: 'user'|'bot', content: str, timestamp}]
+    turn_count: int                       # Contador de repreguntas (máx 4)
+    dialogue_state: str                   # 'gathering_info' | 'ready_for_recommendation'
+    created_at: float
+    ttl_seconds: int = 1800               # Limpieza lazy por inactividad
+```
 
+### 3.5 `FeedbackRecord`
 
-class SessionManager:
-    def create_context(self, session_id: str) -> SessionContext:
+```python
+class FeedbackRecord:
+    session_id: str
+    career_id: str
+    validation_score: int   # [1,5], fuera de rango → HTTP 422
+    timestamp: str          # ISO 8601 UTC
+```
+
+---
+
+## 4. Algoritmos
+
+### 4.1 `calculate_riasec_code(riasec_scores: dict[str,int]) -> str`
+
+Ordena los 6 scores descendente, toma las 3 letras con mayor puntaje. Empates resueltos por orden alfabético (determinismo).
+
+**Ejemplo:**
+```
+riasec_scores = {"R": 8, "I": 9, "A": 7, "S": 6, "E": 5, "C": 4}
+→ Orden descendente: I(9), R(8), A(7), S(6), E(5), C(4)
+→ riasec_code = "IRA"
+```
+
+### 4.2 `calculate_affinity(student_code: str, career_profile: str) -> float`
+
+Peso posicional 3-2-1: si letra de carrera aparece en posición 1 del código suma 3, posición 2 suma 2, posición 3 suma 1 (0 si no aparece).
+
+**Fórmula:**
+```
+score_crudo = suma de pesos posicionales
+afinidad_norm = score_crudo / 18   [normalización explícita a [0,1]]
+```
+
+**Ejemplo:**
+```
+student_code = "RIA"
+career_profile = "RIA"  → R:pos1(+3), I:pos2(+2), A:pos3(+1) = 6/18 = 0.33
+career_profile = "AIR"  → A:pos3(+1), I:pos2(+2), R:pos1(+3) = 6/18 = 0.33
+career_profile = "SIA"  → I:pos2(+2), A:pos3(+1) = 3/18 = 0.17
+```
+
+### 4.3 `calculate_confidence(profile: StudentProfile) -> float`
+
+```
+riasec_completos = 1 si 6 riasec_scores presentes, 0 si no
+pesos_completos = cantidad de {w_afinidad, w_ingreso, w_costo, w_admision, w_duracion} no-null (máx 5)
+
+confidence = (riasec_completos * 6 + pesos_completos) / 11
+clamp a [0, 1]
+```
+
+**Umbrales:**
+- `confidence >= 0.70` → procede a ranking.
+- `turn_count >= 4` → fuerza ranking (degradación controlada), loguea `"graceful_degradation": true`.
+
+### 4.4 `calculate_weights_from_ranking(order: list[str]) -> dict[str,float]`
+
+Input: orden de 5 elementos según prioridad estudiante. Asigna puntaje 5-4-3-2-1 según posición, divide entre suma (`15`).
+
+**Ejemplo:**
+```
+order = ["afinidad", "ingreso", "costo", "admision", "duracion"]
+→ w_afinidad = 5/15 = 0.333
+→ w_ingreso = 4/15 = 0.267
+→ w_costo = 3/15 = 0.200
+→ w_admision = 2/15 = 0.133
+→ w_duracion = 1/15 = 0.067
+suma = 1.0 ✓
+```
+
+### 4.5 `normalize_variable(values, log_transform: bool, invert: bool) -> np.ndarray`
+
+MinMax estándar sobre columna; si `log_transform=True` aplica `log1p` antes; si `invert=True` retorna `1 - MinMax(...)`.
+
+**Usos:**
+- `ingreso_norm`: `log=True, invert=False` (mayor ingreso → mayor score)
+- `costo_norm`: `log=True, invert=False` (inversión ocurre en fórmula final)
+- `duracion_norm`: `log=False, invert=False` (mayor duración → mayor score)
+- `selectividad_norm`: `log=False, invert=True` (mayor admisión → menor selectividad)
+
+### 4.6 `calculate_score(weights: dict, row: CareerFeature) -> float`
+
+```
+score = w_afinidad * afinidad_norm
+      + w_ingreso  * ingreso_norm
+      + w_costo    * (1 - costo_norm)          [inversión: menor costo mejor]
+      + w_admision * (1 - selectividad_norm)   [inversión: más fácil mejor]
+      + w_duracion * (1 - duracion_norm)       [inversión: más rápido mejor]
+```
+
+Todas las entradas y el resultado están en `[0,1]`.
+
+### 4.7 `rank_and_filter(profile: StudentProfile, features_df: DataFrame) -> list[RankingItem]`
+
+1. Aplica filtros duros del Bloque C (región, tipo institución, presupuesto, modalidad). Si usuario dijo "me da igual", no aplica ese filtro.
+2. Calcula `calculate_score` para cada fila restante.
+3. Ordena descendente por `score`.
+4. Desempate: si `abs(score_a - score_b) < 0.001`, orden alfabético ascendente por `institution`.
+5. Retorna **Top-5**.
+6. **Si `features_df` no carga, falla explícitamente** (no continúa con scoring vacío) — error HTTP 500.
+
+### 4.8 Pipeline de Etiquetado RIASEC (Bedrock + Validación Muestral)
+
+```
+tag_careers_with_bedrock(catalog_df, seed_examples: list[10 carreras]) → DataFrame
+    Para cada carrera sin riasec_profile:
+        prompt = few-shot con las 10 carreras semilla
+        prompt += {career_name, field, descripción}
+        Bedrock (Claude-3.5-Sonnet) responde: {"riasec_profile": "XXX", "confidence": 0.0-1.0}
+        Si respuesta inválida (3 reintentos): riasec_source = "pending"
+        Si válida: riasec_profile = XXX, riasec_source = "llm_tagged"
+
+validate_sample(df, sample_size=300, seed=42) → CSV para revisión humana
+    Muestra aleatoria determinística de carreras "llm_tagged"
+    Exporta a data/riasec_validation_sample.csv
+
+apply_family_fallback(df) → DataFrame
+    Para carreras con riasec_source == "pending":
+        Asigna riasec_profile = perfil dominante de su field (moda)
+        riasec_source = "family_fallback"
+    (Ninguna carrera queda sin riasec_profile al finalizar)
+```
+
+---
+
+## 5. LLM_Layer (Amazon Bedrock)
+
+```python
+class LLMLayer:
+    def __init__(self, provider: str = "bedrock", model: str = "anthropic.claude-3-5-sonnet"):
+        ...
+
+    def interpret_bloque_a(self, message: str, history: list[dict]) -> dict:
+        """Extrae/actualiza riasec_scores parciales desde lenguaje natural."""
+
+    def interpret_bloque_b(self, message: str, history: list[dict]) -> dict:
+        """Extrae orden de prioridades (B1) o ajustes directos → pesos parciales."""
+
+    def interpret_bloque_c(self, message: str, history: list[dict]) -> dict:
+        """Extrae filtros duros: región, tipo institución, presupuesto, modalidad."""
+
+    def generate_follow_up(self, profile: StudentProfile, missing_info: list[str]) -> str:
+        """Pregunta abierta, no repite lo ya respondido."""
+
+    def generate_explanation(self, ranking_item: RankingItem, profile: StudentProfile) -> str:
+        """Explicación personalizada por recomendación."""
+
+    def validate_weights(self, weights: dict) -> dict:
+        """Valida que sumen 1 (± 0.01); si no, re-normaliza."""
+```
+
+**Comportamiento:**
+- JSON validado con **máx 3 reintentos**; si falla, continúa con respuesta templada (degradación).
+- `LLM_PROVIDER=bedrock` por defecto en `.env`.
+- Gemini/OpenAI retirados del código; no se implementan en este ciclo.
+
+---
+
+## 6. Embedding_Service (Amazon Bedrock Titan Embeddings)
+
+```python
+class EmbeddingService:
+    def __init__(self, provider: str = "bedrock", model: str = "amazon.titan-embed-text-v2"):
+        ...
+    def embed(self, text: str) -> list[float]:
+        """Retorna embedding de 1024 dimensiones."""
+```
+
+Usado únicamente por `RAG_Module` (funcionalidad secundaria). Si falla, RAG se desactiva sin bloquear `/chat`.
+
+---
+
+## 7. Vector DB — pgvector sobre Aurora PostgreSQL
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+
+CREATE TABLE career_chunks (
+    id BIGSERIAL PRIMARY KEY,
+    career_id TEXT NOT NULL,
+    content TEXT NOT NULL,
+    embedding VECTOR(1024),
+    metadata JSONB,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX ON career_chunks USING ivfflat (embedding vector_cosine_ops);
+CREATE INDEX ON career_chunks(career_id);
+```
+
+---
+
+## 8. Persistencia Relacional (Aurora PostgreSQL)
+
+```sql
+CREATE TABLE feedback (
+    id BIGSERIAL PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    career_id TEXT NOT NULL,
+    validation_score SMALLINT NOT NULL CHECK (validation_score BETWEEN 1 AND 5),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_feedback_session ON feedback(session_id);
+
+CREATE TABLE rankings (
+    id BIGSERIAL PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    ranking_json JSONB NOT NULL,
+    reproducibility_metadata JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_rankings_session ON rankings(session_id);
+```
+
+**Aislamiento:** Toda consulta filtra siempre por `session_id`.
+
+---
+
+## 9. DynamoDB — Georreferencia
+
+```
+Tabla: universities
+  PK: institution_id (S)
+  Atributos: name, region, tipo_institucion, latitude, longitude, careers_ids (SS)
+  GSI: region-index (PK: region)
+```
+
+Consumida por Lambda (`/universities`) o frontend directo para mapa (Leaflet).
+
+---
+
+## 10. Backend Híbrido — Endpoints
+
+| Endpoint | Runtime | Descripción |
+|---|---|---|
+| `POST /session/create` | Lambda | Genera `session_id` + JWT firmado (sin estado compartido) |
+| `POST /chat` | Fargate (ALB/VPC Link) | Orchestrator: valida JWT, mantiene `SessionContext`, ejecuta Bloques A/B/C, invoca Scoring, retorna ranking o follow-up |
+| `POST /feedback` | Lambda | Escribe `FeedbackRecord`, valida score ∈ [1,5] (422 si no) |
+| `GET /universities` | Lambda | Lee `DynamoDB.universities`, filtra por `region` (GSI) |
+
+**Autenticación:** JWT sin estado. Lambda emite, Fargate valida localmente sin llamada de red.
+
+---
+
+## 11. Pipeline de Datos (Batch)
+
+```
+EventBridge (cron diario)
+    → AWS Batch job (o Fargate task, no Lambda por duración LLM)
+        1. ingestion.py — Selenium contra Ponte en Carrera (MINEDU)
+        2. data_clean.py — Estandarización, validación
+        3. feature_engineering.py — Normalización
+        4. riasec_tagging.py — Bedrock few-shot + family fallback
+        5. Genera snapshot: snapshots/features/features_{timestamp}.csv
+```
+
+Si portal MINEDU cambia estructura, se loguea timeout y mantiene última versión conocida.
+
+---
+
+## 12. Requisitos (Trazabilidad)
+
+| Req | Criterio | Implementación |
+|---|---|---|
+| **R1 — RIASEC** | 1.1 Captura conversacional de 6 scores | Bloque A, LLM interpreta |
+| | 1.2 Cálculo de `riasec_code` (3 letras) | `calculate_riasec_code` |
+| | 1.3 Captura opcional: interests, strengths | `StudentProfile.interests` |
+| **R2 — Pesos** | 2.1 Captura de 5 pesos via orden (B1) | `calculate_weights_from_ranking` |
+| | 2.2 Peso explícito en 0 + re-normalización | `validate_weights` |
+| | 2.3 Defaults 0.2 si no se logra priorizar | Fallback en Orchestrator |
+| **R3 — Filtros** | 3.1 Filtros C descartan antes scoring | `rank_and_filter` fase 1 |
+| | 3.2 "Me da igual" desactiva filtro | `profile.region = None` |
+| **R4 — Confianza** | 4.1 Fórmula `calculate_confidence` | 11 campos, [0,1] |
+| | 4.2 Avance si confidence >= 0.70 | `should_transition_to_recommendation` |
+| | 4.3 Máximo 4 repreguntas | `turn_count >= 4` fuerza ranking |
+| **R5 — Scoring** | 5.1 Fórmula 5 criterios | `calculate_score` |
+| | 5.2 Determinismo | Mismo input → mismo ranking 100% |
+| | 5.3 Desempate alfabético | `diff < 0.001` → `institution` ASC |
+| | 5.4 Top-5 con datos verificables | `get_top_n(ranked_list, 5)` |
+| **R6 — Datos** | 6.1 Schema `features.csv` | `CareerFeature` modelo |
+| | 6.2 Etiquetado Bedrock few-shot | `tag_careers_with_bedrock` |
+| | 6.3 Validación muestral 300 carreras | `validate_sample` → CSV |
+| | 6.4 Fallback familia | `apply_family_fallback` |
+| **R7 — LLM** | 7.1 Interpretación Bloques A/B/C | `LLMLayer.interpret_*` |
+| | 7.2 Validación JSON 3 reintentos | `_parse_and_validate_json` |
+| | 7.3 Generación explicaciones | `generate_explanation` |
+| **R8 — Backend** | 8.1 Lambda `/session`, `/feedback`, `/universities` | 3 handlers |
+| | 8.2 Fargate `/chat` + SessionContext memoria | `Orchestrator.handle_turn` |
+| | 8.3 JWT sin estado compartido | `Auth_Service` + validación local |
+| **R9 — Persistencia** | 9.1 Aurora: feedback, rankings aislados | `FeedbackRecord` + índices |
+| | 9.2 pgvector Aurora: career_chunks | `career_chunks` tabla |
+| | 9.3 DynamoDB: universities + GSI region | `universities` tabla |
+| **R10 — No funcionales** | 10.1 Scoring 6k+ combos en ≤ 1s | Benchmark test |
+| | 10.2 Aislamiento por `session_id` | Queries filtrando siempre |
+| | 10.3 Fallback templado si fallan componentes | Degradación controlada |
+| | 10.4 Logging sin PII | No tokens completos, nombres OK |
+
+---
+
+## 13. Propiedades de Corrección
+
+- **Propiedad 1 — Determinismo**: Mismo input → mismo ranking en 100% ejecuciones. _(Req 5.2)_
+- **Propiedad 4 — Reproducibilidad**: Ranking recalculable offline con snapshot + config. _(Req 9.1)_
+- **Propiedad 5 — Confidence Monótono**: Agregar información → confidence nunca disminuye. _(Req 4.1)_
+- **Propiedad 6 — Pesos Válidos**: 5 pesos suman 1 (± 0.01) tras `validate_weights`. _(Req 2.1)_
+
+---
+
+## 14. Restricciones Transversales
+
+- **Package manager:** `uv` (no Poetry/Conda, no pip puro).
+- **Framework Fargate:** FastAPI + Uvicorn.
+- **Framework Lambda:** `boto3` puro (sin frameworks adicionales).
+- **Cobertura tests:** ≥ 60% en `scoring`, `llm_service`, `auth`, `data_pipeline`.
+- **Credenciales:** Variables de entorno / AWS Secrets Manager (nunca hardcodeadas).
+---
+
+## 5. Módulos Detallados (Actualizado)
+
+### `backend/embedding.py` — Embedding_Service (Amazon Bedrock Titan)
+
+**Responsabilidad:** Generar embeddings de texto mediante Amazon Bedrock Titan Embeddings (agnóstico de lógica, solo pasathrough a API).
+
+**API Pública:**
+
+```python
+class EmbeddingService:
+    def __init__(
+        self,
+        provider: str = "bedrock",  # FIXED: solo 'bedrock' en este ciclo
+        model: str = "amazon.titan-embed-text-v2",
+        region: str = "us-east-1",  # Región AWS (default)
+    ):
         """
-        Crea nuevo contexto de sesión vacío.
+        Inicializa servicio de embeddings con Amazon Bedrock.
+        
+        Args:
+            provider: 'bedrock' (único proveedor en MVP)
+            model: 'amazon.titan-embed-text-v2' (modelo Bedrock Titan)
+            region: Región AWS donde ejecutar
+        
+        Comportamiento:
+        - Inicializa cliente Bedrock (`boto3.client("bedrock-runtime")`)
+        - Valida conectividad con Bedrock
+        
+        Errores:
+        - BotoClientError si credenciales no disponibles o región inválida
+        """
+    
+    def embed(self, text: str) -> list[float]:
+        """
+        Genera embedding de texto (1024 dimensiones).
+        
+        Args:
+            text: Texto a embedder (en español o inglés)
         
         Returns:
-            SessionContext con valores iniciales
+            Vector numérico: list[float] de 1024 elementos
         
-        Iniciales:
-        - conversation_turns: []
-        - user_profile: None
-        - confidence_score: 0.0
-        - dialogue_state: 'gathering_info'
+        Timeout:
+        - Máximo 5 segundos
+        
+        Comportamiento:
+        - Llama a Bedrock Titan Embeddings API
+        - Retorna vector normalizado
+        
+        Errores:
+        - APITimeoutError: si timeout > 5s
+        - BotoClientError: si API falla
+        - En ambos casos: retorna None (manejado por caller para degradación)
         """
     
-    def get_context(self, session_id: str) -> SessionContext | None:
+    def embed_batch(self, texts: list[str]) -> list[list[float]] | None:
         """
-        Recupera contexto de sesión existente.
+        Genera embeddings para múltiples textos (optimización batch).
+        
+        Args:
+            texts: Lista de textos
         
         Returns:
-            SessionContext si existe, None si no
+            Lista de vectores (mismo orden que inputs), o None si falla
         
         Comportamiento:
-        - Busca en almacén de sesiones activas por session_id
-        - Retorna copiar para evitar mutaciones accidentales
+        - Agrupa textos en batches si API lo permite
+        - Más eficiente que embed() llamado iterativamente
+        - Si falla cualquier texto, loguea warning pero continúa
+        
+        Timeout:
+        - Máximo 10 segundos total
         """
     
-    def update_profile(
-        self,
-        session_id: str,
-        new_profile_data: dict,  # {interests: [...], salary_priority: float, ...}
-    ) -> None:
+    def similarity(self, vec1: list[float], vec2: list[float]) -> float:
         """
-        Actualiza perfil interpretado del usuario con nueva información.
+        Calcula similitud coseno entre dos vectores.
         
-        Comportamiento:
-        - Si user_profile es None, crea uno nuevo
-        - Merge incremental: nueva info refina/completa, no anula previa
-        - Recalcula confidence_score y missing_info después de merge
-        - Actualiza last_activity
-        - Logs de auditoría registran qué campos fueron actualizados
-        
-        Ejemplo:
-            Turno 1 input: "Me gustan matemáticas"
-            user_profile = {interests: ["matemáticas"], ...}
-            
-            Turno 2 input: "También me gusta diseño"
-            update_profile() → {interests: ["matemáticas", "diseño"], ...}
-        """
-    
-    def append_turn(
-        self,
-        session_id: str,
-        message: str,
-        role: str,  # 'user' | 'bot'
-    ) -> None:
-        """
-        Agrega turno a histórico conversacional.
-        
-        Comportamiento:
-        - Incrementa turn counter automáticamente
-        - Registra timestamp
-        - Persiste en logging para auditoría
-        """
-    
-    def calculate_confidence(
-        self,
-        user_profile: UserProfile,
-    ) -> float:
-        """
-        Calcula confidence_score basado en completitud de perfil.
-        
-        Formula:
-            confidence = (campos_no_null / campos_requeridos_minimo)
-            
-        Campos requeridos mínimo: 4
-            - interests (array no vacío)
-            - salary_priority (float [0,1])
-            - cost_sensitivity (float [0,1])
-            - admission_tolerance (float [0,1])
+        Args:
+            vec1, vec2: Vectores [0, ..., 1023]
         
         Returns:
             float [0.0, 1.0]
         
-        Ejemplo:
-            4/4 campos: 1.0
-            2/4 campos: 0.5
-            0/4 campos: 0.0
-        """
-    
-    def should_transition_to_recommendation(
-        self,
-        session_id: str,
-    ) -> bool:
-        """
-        Determina si contexto está listo para calcular ranking.
-        
-        Returns:
-            True si confidence_score >= 0.70, False en otro caso
-        """
-    
-    def increment_dialogue_turn_count(
-        self,
-        session_id: str,
-    ) -> int:
-        """Incrementa contador de turnos de seguimiento. Retorna nuevo valor."""
-    
-    def has_exceeded_max_dialogue_turns(
-        self,
-        session_id: str,
-        max_turns: int = 4,
-    ) -> bool:
-        """
-        Verifica si se alcanzó máximo de turnos de seguimiento.
-        
-        Default max: 4 (Requerimiento 4 criterio 6)
-        """
-    
-    def clear_context(self, session_id: str) -> None:
-        """
-        Limpia contexto de sesión (para reset parcial dentro misma sesión).
-        
         Comportamiento:
-        - Borra conversation_turns histórico
-        - Reinicia user_profile a None
-        - Reinicia confidence_score a 0.0
-        - Mantiene session_id y timestamp de creación
+        - Operación local (no llamada a API)
+        - Si dimensiones no coinciden, raise ValueError
         """
 ```
 
 **Notas de comportamiento:**
-- Almacén de sesiones puede ser en-memory (demo) o persistente (producción).
-- Actualización de perfil es incremental (merge), no reemplazo.
-- Confidence se recalcula automáticamente en cada actualización.
+- EmbeddingService es **inyectable** en RAG_Module (para pgvector search).
+- Para afinidad RIASEC, **no se usa embedding**; se usa peso posicional directo (§4.2).
+- Si Bedrock falla, degradación controlada: RAG desactivado, flujo principal sin cambios.
 
 ---
 
-### `backend/llm_service.py` — LLM_Layer
+### `backend/llm_service.py` — LLM_Layer (Amazon Bedrock Claude-3.5-Sonnet)
 
-**Responsabilidad:** Interpretar preferencias en lenguaje natural, detectar información faltante, generar preguntas conversacionales y redactar explicaciones personalizadas.
+**Responsabilidad:** Interpretar preferencias en lenguaje natural mediante Claude, detectar información incompleta, generar preguntas y explicaciones.
 
 **API Pública:**
 
 ```python
 class LLMService:
-    def __init__(self, provider: str, model: str, api_key: str | None = None):
+    def __init__(
+        self,
+        provider: str = "bedrock",  # FIXED: solo 'bedrock' en este ciclo
+        model: str = "anthropic.claude-3-5-sonnet-20241022",
+        region: str = "us-east-1",
+    ):
         """
-        Inicializa servicio LLM.
+        Inicializa servicio LLM con Amazon Bedrock/Claude.
         
         Args:
-            provider: 'gemini' | 'openai' | 'local'
-            model: ej 'gemini-1.5-flash', 'gpt-4o-mini'
-            api_key: clave de autenticación (si aplica)
+            provider: 'bedrock' (único)
+            model: Modelo Claude (default: Claude-3.5-Sonnet)
+            region: Región AWS
         
         Comportamiento:
-        - Valida que provider y model sean compatibles
-        - Inicializa cliente del provider
+        - Inicializa cliente Bedrock
+        - Carga system prompts v1 (mínimo 3 ejemplos few-shot por método)
         """
     
-    def interpret_preferences(
+    def interpret_bloque_a(
         self,
-        user_input: str,
-        session_context: SessionContext | None = None,
-    ) -> InterpretationResult:
+        message: str,
+        conversation_history: list[dict],
+    ) -> dict:
         """
-        Interpreta preferencias expresadas en lenguaje natural.
+        Interpreta preferencias RIASEC desde entrada natural (Bloque A).
         
         Args:
-            user_input: Consulta del usuario en español
-            session_context: Contexto previo (para continuidad conversacional)
+            message: Entrada del usuario en español
+            conversation_history: Historial para continuidad
         
         Returns:
-            InterpretationResult con estructura:
             {
-                interests: list[str],
-                salary_priority: float [0,1],
-                cost_sensitivity: float [0,1],
-                admission_tolerance: float [0,1],
-                geographic_preference: str | null,
-                institution_type_preference: str | null,
-                missing_info: list[str],
-                confidence_score: float [0,1],
-                confidence_reasoning: str,
-                suggested_follow_up: str | null,
-                raw_llm_response: str  # Para auditoría
+                "riasec_scores": {
+                    "R": int [1,10],  # Realista
+                    "I": int [1,10],  # Investigador
+                    "A": int [1,10],  # Artístico
+                    "S": int [1,10],  # Social
+                    "E": int [1,10],  # Empresarial
+                    "C": int [1,10]   # Convencional
+                },
+                "missing_letters": list[str],  # Letras sin estimar
+                "confidence": float [0,1]
             }
         
         Comportamiento:
-        - Usa few-shot prompting con mínimo 3 ejemplos
-        - Genera JSON estructurado validado
-        - Si LLM retorna JSON inválido, reintenta máximo 3 veces
-        - Si 3 intentos fallan, lanza JSONParseError
-        - Si respuesta es ambigua, documenta en confidence_reasoning
+        - Usa system prompt de few-shot con 3+ ejemplos de perfiles RIASEC
+        - Extrae scores parciales (puede no tener los 6)
+        - JSON validado; si inválido (3 reintentos), retorna estructura templada
         
         Timeout:
-        - Máximo 3 segundos por llamada a LLM
-        - Si timeout, relanza TimeoutError (manejado por Orchestration)
+        - Máximo 5 segundos
         
-        Errores:
-        - JSONParseError: si JSON es inválido tras 3 intentos
-        - TimeoutError: si respuesta tarda > 3s
-        - APIError: si API del proveedor falla
+        Ejemplos en prompt:
+            "Si el usuario dice 'Me encantan los números y resolver problemas', 
+             entonces: R=8, I=9, A=3, S=4, E=6, C=7"
         """
     
-    def generate_follow_up_question(
+    def interpret_bloque_b(
         self,
-        current_profile: UserProfile,
+        message: str,
+        conversation_history: list[dict],
+    ) -> dict:
+        """
+        Interpreta prioridades de criterios (Bloque B).
+        
+        Args:
+            message: Entrada del usuario
+            conversation_history: Historial
+        
+        Returns:
+            {
+                "priority_order": list[str] | None,  
+                    # Ejemplo: ["afinidad", "ingreso", "costo", "admision", "duracion"]
+                    # Orden de prioridad descendente (1er elemento = más importante)
+                    # None si el usuario aún no prioriza
+                "explicit_weights": dict | None,
+                    # Alternativa: {w_afinidad: 0.3, w_ingreso: 0.2, ...}
+                    # None si se usa order en lugar de pesos explícitos
+                "confidence": float [0,1]
+            }
+        
+        Comportamiento:
+        - Detecta si usuario da orden explícita ("lo más importante es X, luego Y")
+        - O detecta pesos implícitos ("me interesa ingresos pero costo no"
+        - Retorna order si es claro; weights si es explícito; None si indeciso
+        - JSON validado; fallback templado si falla
+        
+        Timeout:
+        - Máximo 5 segundos
+        """
+    
+    def interpret_bloque_c(
+        self,
+        message: str,
+        conversation_history: list[dict],
+    ) -> dict:
+        """
+        Interpreta filtros duros (Bloque C).
+        
+        Args:
+            message: Entrada del usuario
+            conversation_history: Historial
+        
+        Returns:
+            {
+                "region": str | None,  
+                    # Región específica o None (= "me da igual")
+                "tipo_institucion": "publica" | "privada" | None,
+                "presupuesto_max": float | None,  # En soles
+                "modalidad": "presencial" | "virtual" | None,
+                "confidence": float [0,1]
+            }
+        
+        Comportamiento:
+        - Detecta si usuario menciona "me da igual" para algún filtro → None
+        - Detecta región: "Lima", "Arequipa", etc. → normaliza a región oficial
+        - Detecta tipo: "pública", "privada"
+        - Detecta presupuesto: números mencionados
+        - Detecta modalidad: "online", "virtual", "presencial"
+        
+        Timeout:
+        - Máximo 5 segundos
+        """
+    
+    def generate_follow_up(
+        self,
+        profile: StudentProfile,
         missing_info: list[str],
         conversation_history: list[dict],
     ) -> str:
         """
-        Genera pregunta conversacional para completar información faltante.
+        Genera pregunta abierta para completar información faltante.
         
         Args:
-            current_profile: Perfil parcial conocido
-            missing_info: Lista de campos que faltan
-            conversation_history: Turnos previos para contexto
+            profile: Perfil parcial actual
+            missing_info: Lista de campos que faltan (ej ["afinidad_E", "w_ingreso"])
+            conversation_history: Historial para evitar repeticiones
         
         Returns:
-            Pregunta en español peruano, abierta, conversacional, no invasiva
+            Pregunta conversacional en español peruano
         
         Restricciones (Requerimiento 4):
-        - Pregunta DEBE ser abierta (no SÍ/NO)
-        - DEBE mencionar por qué la información es útil
-        - NO DEBE repetir información ya mencionada
+        - DEBE ser pregunta abierta (no SÍ/NO)
+        - DEBE mencionar por qué es útil la información
+        - NO DEBE repetir lo ya mencionado en historial
         - DEBE ser contextual al perfil parcial
         
-        Ejemplo correcto:
-            "¿Hay alguna región del Perú donde prefieras estudiar, 
-             o tienes flexibilidad? Algunos estudiantes lo dejan 
-             abierto para más opciones."
+        Ejemplos correctos:
+            "Veo que te interesan las matemáticas. ¿Hay algún aspecto de 
+             una carrera que sea especialmente importante para ti? Por ejemplo, 
+             algunos priorizan los ingresos futuros, otros el costo, y otros 
+             la facilidad de admisión."
         
-        Ejemplo incorrecto:
-            "¿Qué región? (Respuesta obligatoria)"
+        Ejemplos incorrectos:
+            "¿Cuál es tu región?" (directa, no abierta)
+            "Dijiste que te gustan mates, ¿y qué más?" (repite lo ya dicho)
+        
+        Timeout:
+        - Máximo 3 segundos
         
         Comportamiento:
-        - Usa system prompt v1 con ejemplos few-shot
-        - No genera pregunta "agresiva" o directa
-        - Si no hay información faltante clara, retorna string vacío
+        - Usa few-shot de preguntas naturales
+        - Si no hay missing_info claro, retorna string vacío
         """
     
     def generate_explanation(
         self,
-        ranking_position: int,
+        ranking_position: int,  # 1, 2, ..., 5
         career: str,
         institution: str,
-        concordancia_score: float,
-        scores_by_criterion: dict,  # {affinity, salary, cost, admission}
-        user_profile: UserProfile,
-        verifiable_data: dict,  # {monthly_income, annual_cost, admission_rate, duration}
+        concordancia_score: float,  # [0,1]
+        scores_by_criterion: dict,  # {afinidad, ingreso, costo, admision, duracion}
+        user_profile: StudentProfile,
+        verifiable_data: dict,  # {ingreso_promedio, costo_mensualidad, tasa_admision, duracion_anios}
     ) -> str:
         """
         Redacta explicación personalizada de recomendación.
         
         Args:
-            ranking_position: 1, 2 o 3 (ranking position)
+            ranking_position: Posición en ranking (1–5)
             career, institution: Nombres de carrera y universidad
             concordancia_score: Score final [0,1]
             scores_by_criterion: Desglose por criterio
-            user_profile: Perfil del usuario para contextualización
-            verifiable_data: Datos duros de Ponte en Carrera
+            user_profile: Perfil del usuario
+            verifiable_data: Datos oficiales del MINEDU
         
         Returns:
-            Texto explicación de 3–5 oraciones en español peruano
+            Texto de 3–5 oraciones en español peruano
         
-        Comportamiento:
-        - Debe incluir:
-            (a) Qué criterio/característica coincide con perfil
-            (b) Al menos 1 dato verificable (ingresos, costo, tasa admisión)
-            (c) Conexión beneficio-usuario
-        - NO inventa datos; todos números vienen de verifiable_data
-        - Cita fuente implícitamente: "según datos oficiales del MINEDU"
-        - Usa system prompt v1 con ejemplos few-shot
+        Contenido obligatorio:
+        - Qué criterio/característica coincide con perfil
+        - Al menos 1 dato verificable (ingresos, costo, tasa admisión)
+        - Conexión beneficio-usuario
+        
+        Restricción: NO inventa datos; todos vienen de verifiable_data
         
         Ejemplo correcto:
-            "Te recomendamos Estadística en la UNMSM porque 
-             tu afinidad con el análisis de datos es muy alta (85/100). 
-             Esta carrera ofrece uno de los mejores ingresos 
-             (S/. 3,200/mes) y es accesible financieramente 
-             (S/. 1,200/año). Aunque es selectiva (18% de admisión), 
-             es factible si tienes fortaleza en matemáticas."
+            "Te recomendamos Estadística en la UNMSM porque tu afinidad 
+             con el análisis de datos es muy alta (85/100). Esta carrera 
+             ofrece uno de los mejores ingresos (S/. 3,200/mes) según datos 
+             oficiales del MINEDU. Aunque es selectiva (18% de admisión), 
+             es factible con tu fortaleza en matemáticas."
         
         Fallback (si LLM falla):
-            "Recomendamos [carrera] en [universidad] porque alinea 
-             bien con tus intereses. Ingresos promedio: [valor]. 
-             Costo: [valor]. Tasa de admisión: [valor]."
+            "Recomendamos [carrera] en [universidad] porque alinea bien 
+             con tus intereses (score: [score]). Ingresos promedio: S/. [X]/mes. 
+             Costo: S/. [Y]/año. Tasa de admisión: [Z]%."
         
         Timeout:
         - Máximo 3 segundos
         
         Errores:
-        - Si LLM falla, utiliza fallback templated
+        - Si LLM falla, retorna fallback templated (no excepción)
         """
     
-    def validate_weights(
-        self,
-        weights: dict,  # {affinity: float, salary: float, cost: float, admission: float}
-        tolerance: float = 0.01,
-    ) -> bool:
+    def validate_weights(self, weights: dict) -> dict:
         """
-        Valida que pesos sean válidos: cada wᵢ ∈ [0,1] y suma ≈ 1.0.
+        Valida que pesos sean válidos (todos en [0,1], suma = 1.0 ± 0.01).
         
         Args:
-            weights: Dict con 4 pesos
-            tolerance: Tolerancia en suma (default 0.01)
+            weights: {w_afinidad, w_ingreso, w_costo, w_admision, w_duracion}
         
         Returns:
-            True si válidos, False en otro caso
+            Weights validados y normalizados (si suma ≠ 1, re-normaliza)
         
-        Validaciones:
-        - Cada peso en rango [0, 1]
-        - Suma total: 1.0 ± tolerance
-        - Todos pesos presentes en dict
+        Comportamiento:
+        - Si suma < 0.99 o > 1.01: divide cada peso entre suma actual
+        - Soporta pesos en 0 explícitos (re-normaliza el resto)
+        - Todos pesos quedan en [0,1]
         """
 ```
 
 **Notas de comportamiento:**
-- Sistema prompt v1 debe incluir mínimo 3 ejemplos few-shot de diferentes perfiles.
-- Si LLM externa falla 3 veces, no reintentar infinitamente; fallar explícitamente para que Orchestration maneje.
-- Logging debe registrar pesos generados, confidence, y cualquier anomalía detectada.
+- Todas las respuestas JSON son validadas con **máx 3 reintentos**; si falla, fallback templado.
+- System prompts incluyen mínimo 3 ejemplos few-shot por método (definidos en `prompts/` subdirectorio).
+- `LLM_PROVIDER=bedrock` y `LLM_MODEL=anthropic.claude-3-5-sonnet-20241022` en `.env`.
 
 ---
 
 ### `backend/scoring.py` — Scoring_Engine
 
-**Responsabilidad:** Calcular indicadores de concordancia multi-criterio, generar rankings determinísticos y aplicar filtros.
+**Responsabilidad:** Calcular concordancia multi-criterio determinística, generar rankings ordenados.
 
 **API Pública:**
 
 ```python
 class ScoringEngine:
-    def __init__(self, features_csv_path: str, config_json_path: str):
+    def __init__(
+        self,
+        features_csv_path: str,
+        config_json_path: str,
+    ):
         """
-        Inicializa motor de scoring con features normalizadas.
+        Inicializa motor de scoring.
         
         Args:
             features_csv_path: Ruta a data/features.csv
@@ -629,132 +841,169 @@ class ScoringEngine:
         
         Comportamiento:
         - Carga features.csv en memoria (Pandas DataFrame)
-        - Carga configuración desde JSON
-        - Valida que columnas requeridas existan
+        - Carga config.json (parámetros de normalización)
+        - Valida esquema: career_id, career_name, institution, 
+          riasec_profile, ingreso_norm, costo_norm, selectividad_norm, 
+          duracion_norm, region, tipo_institucion, datos verificables
         
         Errores:
-        - FileNotFoundError si archivos no existen
-        - ValueError si esquema incorrecto
+        - FileNotFoundError: si archivos no existen
+        - ValueError: si esquema incorrecto
         """
     
-    def calculate_concordancia_score(
-        self,
-        weights: dict,  # {affinity: float, salary: float, cost: float, admission: float}
-        affinity_scores: list[float],  # [0,1] por cada carrera en order
-        career_id: int,  # Index en dataset
-    ) -> float:
+    def calculate_riasec_code(self, riasec_scores: dict[str, int]) -> str:
         """
-        Calcula score de una carrera individual usando fórmula.
-        
-        Formula base (suma ponderada):
-            score = w_affinity * affinity + w_salary * income_score + 
-                    w_cost * cost_score + w_admission * admission_score
+        Calcula código RIASEC (3 letras) desde 6 scores.
         
         Args:
-            weights: Pesos {affinity, salary, cost, admission}
-            affinity_scores: Array de afinidades pre-calculadas
-            career_id: Índice en dataset features.csv
+            riasec_scores: {"R": 8, "I": 9, "A": 7, "S": 6, "E": 5, "C": 4}
+        
+        Returns:
+            Código de 3 letras, ej "IRA"
+        
+        Lógica:
+        - Ordena 6 scores descendente
+        - Toma las 3 primeras letras
+        - Empates resueltos por orden alfabético
+        """
+    
+    def calculate_affinity(
+        self,
+        student_code: str,
+        career_profile: str,
+    ) -> float:
+        """
+        Calcula afinidad RIASEC mediante peso posicional.
+        
+        Args:
+            student_code: "RIA" (perfil estudiante)
+            career_profile: "RIA" (perfil carrera)
         
         Returns:
             float [0, 1]
         
-        Comportamiento:
-        - Busca columnas: income_score, cost_score, admission_score en dataset
-        - Usa affinity_scores[career_id]
-        - Todos operandos son [0,1], resultado es [0,1]
-        - Si alguna variable faltante (NULL), marcar carrera como "no evaluable"
+        Fórmula:
+        - Posición 1 en student_code: +3 puntos
+        - Posición 2: +2 puntos
+        - Posición 3: +1 punto
+        - No aparece: 0 puntos
+        
+        score_crudo = suma de puntos para cada letra de career_profile
+        afinidad_norm = score_crudo / 18  (máximo posible)
         
         Determinismo:
-        - Mismo input → mismo score en todos los casos
-        - Sin redondeos intermedios que causen varianza
+        - Mismo input → mismo output en todas las ejecuciones
         """
     
-    def rank_all_careers(
+    def calculate_score(
         self,
-        weights: dict,
-        affinity_scores: list[float],
-        geographic_filter: str | None = None,
-        institution_type_filter: str | None = None,
-        budget_max: float | None = None,
-    ) -> list[dict]:
+        weights: dict,  # {w_afinidad, w_ingreso, w_costo, w_admision, w_duracion}
+        afinidad: float,  # [0,1]
+        ingreso_norm: float,  # [0,1]
+        costo_norm: float,  # [0,1]
+        selectividad_norm: float,  # [0,1]
+        duracion_norm: float,  # [0,1]
+    ) -> float:
         """
-        Calcula ranking completo aplicando filtros opcionales.
+        Calcula concordancia score de una carrera.
         
-        Args:
-            weights: Pesos dinámicos
-            affinity_scores: Array de afinidades por carrera
-            geographic_filter: Región (ej "Lima") o None para ningún filtro
-            institution_type_filter: 'pública', 'privada', o None
-            budget_max: Costo máximo aceptable o None
+        Fórmula:
+            score = w_afinidad * afinidad
+                  + w_ingreso * ingreso_norm
+                  + w_costo * (1 - costo_norm)           [inversión]
+                  + w_admision * (1 - selectividad_norm)  [inversión]
+                  + w_duracion * (1 - duracion_norm)      [inversión]
         
         Returns:
-            List de dicts ordenados por score descendente:
+            float [0, 1]
+        
+        Notas:
+        - Todas las entradas están normalizadas [0,1]
+        - Inversiones: menor costo/selectividad/duración → mayor score
+        """
+    
+    def rank_and_filter(
+        self,
+        profile: StudentProfile,
+        features_df: pd.DataFrame,
+    ) -> list[dict]:
+        """
+        Genera ranking completo aplicando filtros y scoring.
+        
+        Args:
+            profile: Perfil estudiante con RIASEC, pesos, filtros
+            features_df: Dataset de carreras-universidades
+        
+        Returns:
+            List de dicts ordenado por score DESC:
             [
                 {
-                    rank: 1,
-                    career: "Estadística",
-                    institution: "UNMSM",
-                    concordancia_score: 0.847,
-                    scores_by_criterion: {
-                        affinity: 0.85,
-                        salary: 0.82,
-                        cost: 0.90,
-                        admission: 0.60
+                    "rank": 1,
+                    "career_id": "...",
+                    "career_name": "Estadística",
+                    "institution": "UNMSM",
+                    "concordancia_score": 0.847,
+                    "scores_by_criterion": {
+                        "afinidad": 0.85,
+                        "ingreso": 0.82,
+                        "costo": 0.90,
+                        "admision": 0.60,
+                        "duracion": 0.75
                     },
-                    verifiable_data: {
-                        monthly_income: 3200,
-                        annual_cost: 1200,
-                        admission_rate: 18,
-                        duration_years: 5
+                    "verifiable_data": {
+                        "ingreso_promedio": 3200,
+                        "costo_mensualidad": 100,
+                        "tasa_admision": 18,
+                        "duracion_anios": 5
                     }
                 },
                 ...
             ]
         
-        Comportamiento:
-        - Calcula concordancia para TODAS las carreras
-        - Aplica filtros: geographic, institution_type, budget
-            - geographic: if filter="Lima", retener si location=="Lima"
-            - institution_type: if filter="pública", retener si mgmt=="público"
-            - budget: retener si annual_cost <= budget_max
-        - Ordena resultado por concordancia_score DESC
-        - Empatados (diff < 0.001): desempatador alfabético por institution
-        - Retorna completo (no truncado a Top-N aquí; eso es responsabilidad de Orchestration)
+        Lógica (7 pasos):
+        1. Calcula RIASEC code desde profile.riasec_scores
+        2. Para cada fila en features_df:
+           a. Aplica filtros duros (C: región, tipo inst, presupuesto, modalidad)
+           b. Si usuario dijo "me da igual", ignora ese filtro
+           c. Si supera filtros: calcula afinidad RIASEC
+           d. Calcula score final
+        3. Ordena resultados por score DESC
+        4. Desempate (abs(score_a - score_b) < 0.001): orden alfabético por institution
+        5. Asigna rank
+        6. Retorna completo (sin truncar)
         
-        Determinismo:
-        - Todos los inputs son determinísticos → output determinístico
-        - Desempate alfabético garantiza orden único
+        Fallback (degradación):
+        - Si features_df vacío: raise FileNotFoundError explícito
+        - Si algún campo normalizador falta: logea warning, asume 0.5
+        - Si riasec_profile de carrera falta: afinidad = 0.5
         
         Timeout:
-        - Para dataset 1500 combinaciones: ≤ 1 segundo
-        
-        Errores:
-        - Si algún filtro invalida: loguear warning pero no fallar,
-          simplemente no aplicar ese filtro
+        - Para dataset ~6,208 carreras: ≤ 1 segundo
         """
     
     def get_top_n(
         self,
         ranked_list: list[dict],
-        n: int = 3,
+        n: int = 5,
     ) -> list[dict]:
         """
         Extrae Top-N de ranking completo.
         
         Args:
-            ranked_list: Resultado de rank_all_careers
-            n: Número de resultados (default 3, rango 1–10)
+            ranked_list: Resultado de rank_and_filter
+            n: Número de resultados (default 5, rango [1,10])
         
         Returns:
             Primeros N elementos de ranked_list
         
         Validación:
-        - Si n < 1 o n > 10, clampear a rango [1, 10]
+        - Si n < 1: clampea a 1
+        - Si n > 10: clampea a 10
         """
     
     def reload_features(self) -> None:
         """
-        Recarga features.csv desde disco (para cambios de datos sin reiniciar servidor).
+        Recarga features.csv desde disco sin reiniciar servidor.
         
         Comportamiento:
         - Lee features.csv nuevamente
@@ -762,20 +1011,20 @@ class ScoringEngine:
         - Reemplaza dataset en memoria
         
         Errores:
-        - FileNotFoundError, ValueError: propagados para manejo por Orchestration
+        - FileNotFoundError, ValueError: propagados a caller
         """
 ```
 
 **Notas de comportamiento:**
-- Dataset features.csv se carga en memoria al inicializar. Para datasets > 100MB, considerar carga lazy (decisión de diseño).
-- Filtros son opcionales; si no especificados, aplican a todas las combinaciones.
-- Scores son determinísticos: mismo input → mismo ranking en 100% de ejecuciones.
+- Determinismo absoluto: mismo input → mismo ranking en 100% ejecuciones.
+- Scoring es en-process (sin llamadas a APIs externas).
+- Dataset cargado en memoria al startup; para datasets > 100MB, considerar carga lazy.
 
 ---
 
-### `backend/rag.py` — RAG_Module
+### `backend/rag.py` — RAG_Module (pgvector/Aurora)
 
-**Responsabilidad:** Permitir consultas conversacionales sobre detalles de carreras recomendadas mediante recuperación + generación sobre documentos embeddeados.
+**Responsabilidad:** Permitir consultas conversacionales sobre detalles de carreras mediante recuperación + generación.
 
 **API Pública:**
 
@@ -783,21 +1032,20 @@ class ScoringEngine:
 class RAGModule:
     def __init__(
         self,
-        vector_db_type: str,  # 'faiss' | 'pinecone' | 'chroma' | 'weaviate'
-        vector_db_config: dict | None = None,
+        db_url: str,  # Conexión Aurora PostgreSQL con pgvector
         embedding_service: EmbeddingService,
     ):
         """
         Inicializa módulo RAG.
         
         Args:
-            vector_db_type: Tipo de vector DB a usar
-            vector_db_config: Configuración específica (URLs, claves, etc.)
-            embedding_service: Instancia de EmbeddingService para embeddings
+            db_url: URI de PostgreSQL (ej psycopg://user:pass@host/db)
+            embedding_service: Instancia de EmbeddingService (Bedrock Titan)
         
         Comportamiento:
-        - Inicializa conexión a vector DB
-        - Valida que al menos 1 carrera piloto esté indexada
+        - Conecta a Aurora PostgreSQL
+        - Valida que tabla career_chunks existe
+        - Valida que extensión pgvector está activa
         """
     
     def is_career_available(self, career: str) -> bool:
@@ -808,10 +1056,10 @@ class RAGModule:
             career: Nombre de carrera (ej "Estadística")
         
         Returns:
-            True si documentos indexados, False en otro caso
+            True si chunks indexados en pgvector, False en otro caso
         
         Comportamiento:
-        - Verifica si existen chunks en vector DB asociados a career
+        - Query a PostgreSQL: SELECT COUNT(*) FROM career_chunks WHERE career_id = ?
         - Búsqueda rápida sin embeddings
         """
     
@@ -820,9 +1068,9 @@ class RAGModule:
         career: str,
         question: str,
         top_k: int = 3,
-    ) -> RagResponse:
+    ) -> dict:
         """
-        Realiza consulta sobre detalles de carrera.
+        Realiza consulta RAG sobre detalles de carrera.
         
         Args:
             career: Nombre de carrera
@@ -830,68 +1078,86 @@ class RAGModule:
             top_k: Número de chunks a recuperar (default 3)
         
         Returns:
-            RagResponse con:
             {
-                answer: str,  # Respuesta generada por LLM
-                sources: list[str],  # Documentos citados
-                confidence: float,  # [0,1]
-                status: str  # 'success' | 'no_documents' | 'error'
+                "status": "success" | "no_documents" | "error",
+                "answer": str,
+                "sources": list[str],
+                "confidence": float [0,1]
             }
         
-        Comportamiento:
-        - Genera embedding de pregunta
-        - Busca Top-K chunks en vector DB (filtered por career)
-        - Pasa chunks + pregunta a LLM con prompt RAG
-        - LLM genera respuesta
-        - Extrae y retorna fuentes
+        Lógica:
+        1. Verifica si career disponible vía is_career_available()
+           → Si no: retorna status="no_documents"
+        2. Genera embedding de question vía EmbeddingService.embed()
+           → Si falla: retorna status="error" (RAG no bloquea flujo)
+        3. Busca Top-K chunks similares en pgvector:
+           SELECT content, metadata FROM career_chunks 
+           WHERE career_id = ?
+           ORDER BY embedding <=> ? LIMIT K
+        4. Pasa chunks + question a LLMService.generate_explanation()
+           (re-usa mismo LLM para generar respuesta)
+        5. Extrae y retorna fuentes desde metadata
         
         Timeout:
-        - Máximo 2 segundos total (retrieval + generación)
+        - Máximo 3 segundos (similarity search + LLM)
         
-        Errores:
-        - Si career no tiene RAG: retornar RagResponse con status='no_documents'
-        - Si embedding falla: retornar status='error'
-        - Si LLM falla: retornar status='error'
+        Degradación:
+        - Si embedding falla: retorna status="error", answer="No hay información..."
+        - Si LLM falla: retorna status="error"
+        - RAG nunca bloquea el flujo principal (/chat)
         """
     
     def index_career_documents(
         self,
         career: str,
-        documents: list[str],  # Textos de PDFs procesados
-        metadata: dict | None = None,
+        documents: list[str],
+        metadata_dict: dict | None = None,
     ) -> None:
         """
-        Indexa documentos de una carrera en vector DB.
+        Indexa documentos de una carrera en pgvector.
         
         Args:
             career: Nombre de carrera
-            documents: Textos a indexar (ya procesados, no PDFs crudos)
-            metadata: {plan_curricular: bool, perfil_profesional: bool, ...}
+            documents: Textos ya procesados (no PDFs crudos)
+            metadata_dict: {plan_curricular: bool, perfil_profesional: bool, ...}
         
         Comportamiento:
         - Divide textos en chunks (~500 caracteres, 50 char overlap)
-        - Genera embeddings de cada chunk
-        - Almacena en vector DB con metadata {career, source, chunk_id}
+        - Genera embeddings vía EmbeddingService.embed_batch()
+        - Inserta en career_chunks con metadata:
+          INSERT INTO career_chunks (career_id, content, embedding, metadata)
+          VALUES (?, ?, ?, ?)
         
         Notas:
-        - Esta función es llamada durante setup/importación de datos
+        - Llamada durante setup/importación de datos (offline)
         - Para demo: solo 3–5 carreras piloto
+        
+        Timeout:
+        - Máximo 30 segundos (para ~10 documentos)
         """
     
     def get_available_careers(self) -> list[str]:
-        """Retorna lista de carreras con RAG disponible."""
+        """
+        Retorna lista de carreras con RAG disponible.
+        
+        Returns:
+            List de nombres de carrera (ej ["Estadística", "Ingeniería"])
+        
+        Comportamiento:
+        - Query: SELECT DISTINCT career_id FROM career_chunks
+        """
 ```
 
 **Notas de comportamiento:**
-- RAG es OPCIONAL: si no está disponible para una carrera, sistema continúa sin error.
-- Vector DB agnóstico: puede ser FAISS local o servicio cloud.
-- Embedding service es inyectable: permite cambiar proveedor sin modificar RAG_Module.
+- RAG es **opcional**: si no disponible para carrera, sistema continúa sin error.
+- Vector DB es **pgvector en Aurora PostgreSQL** (no FAISS, Pinecone, Chroma).
+- EmbeddingService es inyectable: permite cambiar proveedor sin modificar RAG_Module.
 
 ---
 
-### `backend/feedback.py` — Feedback_Storage
+### `backend/feedback.py` — Feedback_Storage (Aurora PostgreSQL)
 
-**Responsabilidad:** Persistir consultas, perfiles, rankings, explicaciones y validaciones de usuario en base de datos, construyendo histórico para análisis y entrenamiento futuro.
+**Responsabilidad:** Persistir consultas, rankings, explicaciones y validaciones en Aurora PostgreSQL, construyendo histórico.
 
 **API Pública:**
 
@@ -899,15 +1165,15 @@ class RAGModule:
 class FeedbackStorage:
     def __init__(self, db_url: str):
         """
-        Inicializa almacenamiento de feedback.
+        Inicializa almacenamiento de feedback en Aurora.
         
         Args:
-            db_url: URI de base de datos (sqlite, postgresql, etc.)
-                    Ej: 'sqlite:///feedback.db', 'postgresql://...'
+            db_url: URI PostgreSQL (ej psycopg://user:pass@host/careermatch)
         
         Comportamiento:
-        - Conecta a base de datos
-        - Crea tablas si no existen (schema migration)
+        - Conecta a Aurora PostgreSQL
+        - Crea tablas si no existen (feedback, rankings)
+        - Valida schema
         """
     
     def save_ranking(
@@ -920,76 +1186,96 @@ class FeedbackStorage:
         timestamp: datetime,
     ) -> str:
         """
-        Guarda consulta y ranking generado (sin validación usuario aún).
+        Guarda ranking generado (sin validación usuario aún).
         
         Args:
             session_id: ID única de sesión
             user_input: Consulta original del usuario
-            profile_interpreted: Dict interpretado por LLM
+            profile_interpreted: Perfil interpretado (JSON)
             weights_generated: Pesos dinámicos
-            ranking_generated: Top-3 ranking
+            ranking_generated: Top-5 ranking (JSON)
             timestamp: Fecha/hora de generación
         
         Returns:
-            ranking_id: Identificador único del ranking para vincular feedback
+            ranking_id: Identificador único para vincular feedback posterior
         
         Comportamiento:
-        - Inserta registro en tabla feedback con todos los datos
-        - Genera ranking_id único (uuid + timestamp hash)
-        - Persiste completo: inputs, outputs, pesos, scores
+        - Inserta en tabla rankings:
+          INSERT INTO rankings 
+          (session_id, ranking_json, reproducibility_metadata, created_at)
+          VALUES (?, ?, ?, ?)
+        
+        ranking_json contiene: {profile, weights, top_5_items}
+        reproducibility_metadata contiene: {snapshot_id, config_id, timestamp}
+        
+        - Genera ranking_id único: uuid4()
+        - Retorna ranking_id
         
         Timeout:
         - Máximo 5 segundos (incluye retry si DB temporalmente no disponible)
         
-        Errores:
-        - Si DB no disponible tras reintento exponencial:
-            - Logea error
-            - Almacena en queue local en-memory
-            - Retorna ranking_id provisional
-            - En siguiente oportunidad, sincroniza queue
+        Fallback (degradación):
+        - Si DB no disponible: logea error, almacena en queue local en-memory
+        - Retorna ranking_id provisional
+        - En siguiente oportunidad, sincroniza queue a DB
         """
     
     def update_validation(
         self,
         ranking_id: str,
-        validation_score: int,  # 1–5 escala Likert
+        validation_score: int,  # [1, 5]
         selected_career: str | None = None,
         notes: str | None = None,
         timestamp: datetime | None = None,
     ) -> None:
         """
-        Actualiza registro con validación del usuario.
+        Actualiza ranking con validación del usuario.
         
         Args:
             ranking_id: ID del ranking a actualizar
-            validation_score: Escala 1–5
+            validation_score: Escala Likert 1–5
             selected_career: Carrera elegida por usuario (opcional)
             notes: Comentarios libres (opcional)
             timestamp: Fecha de validación (auto si None)
         
         Comportamiento:
-        - Localiza registro por ranking_id
-        - Actualiza campos user_validation
-        - Calcula timestamp automáticamente si no provisto
+        - Localiza ranking por ranking_id en tabla rankings
+        - Actualiza campos en JSONB ranking_json:
+          ranking_json['user_validation'] = {
+              score: validation_score,
+              selected_career: selected_career,
+              notes: notes,
+              timestamp: timestamp
+          }
+        - UPDATE rankings SET ranking_json = ? WHERE id = ?
         
         Validaciones:
-        - validation_score ∈ [1, 5]; si fuera de rango, rechazar
-        - ranking_id debe existir; si no, retornar error
+        - validation_score ∈ [1, 5]; si fuera: ValueError
+        - ranking_id debe existir; si no: ValueError
         
-        Errores:
-        - ranking_id inexistente: ValueError
-        - validation_score inválido: ValueError
-        - DB no disponible: reintento + queue fallback (igual que save_ranking)
+        Timeout:
+        - Máximo 5 segundos (incluye retry)
+        
+        Fallback (degradación):
+        - Si DB no disponible: queue local, sincroniza después
         """
     
     def get_ranking_by_id(self, ranking_id: str) -> dict | None:
         """
         Recupera ranking completo (para reproducibilidad, auditoría).
         
+        Args:
+            ranking_id: ID del ranking
+        
         Returns:
             Dict con todos los campos del ranking, o None si no existe
         
-        Nota: No incluye datos de otros usuarios (aislamiento garantizado por DB schema)
+        Comportamiento:
+        - SELECT ranking_json FROM rankings WHERE id = ?
+        - Retorna JSONB completo deserializado
+        
+        Notas:
+        - No expone datos de otros usuarios (aislamiento garantizado por WHERE session_id)
         """
     
     def query_feedback_aggregated(
@@ -999,7 +1285,7 @@ class FeedbackStorage:
         date_range: tuple[datetime, datetime] | None = None,
     ) -> list[dict]:
         """
-        Consulta agregada de feedback para análisis (sin datos PII de usuarios).
+        Consulta agregada de feedback para análisis (sin PII).
         
         Args:
             filter_career: Carrera específica (None = todas)
@@ -1010,11 +1296,11 @@ class FeedbackStorage:
             List de registros agregados:
             [
                 {
-                    career: "Estadística",
-                    institution: "UNMSM",
-                    validation_scores: [4, 5, 3, 4],
-                    avg_validation: 4.0,
-                    count: 4
+                    "career": "Estadística",
+                    "institution": "UNMSM",
+                    "validation_scores": [4, 5, 3, 4],
+                    "avg_validation": 4.0,
+                    "count": 4
                 },
                 ...
             ]
@@ -1022,100 +1308,29 @@ class FeedbackStorage:
         Comportamiento:
         - NO expone datos individuales de usuarios
         - Agrupa por (career, institution)
-        - Calcula estadísticas
-        - Usado para análisis de calidad posterior
+        - Calcula estadísticas desde ranking_json['user_validation']['score']
+        - Query:
+          SELECT 
+              ranking_json->'career' AS career,
+              ranking_json->'institution' AS institution,
+              COUNT(*) AS count,
+              AVG((ranking_json->'user_validation'->>'score')::int) AS avg_validation,
+              ... GROUP BY career, institution
+        
+        Usado para análisis de calidad posterior
         """
 ```
 
 **Notas de comportamiento:**
-- Aislamiento: query y save incluyen implícitamente `session_id`, garantizando un usuario no ve datos de otros.
+- Aislamiento: queries filtran implícitamente por `session_id` en contexto de seguridad.
 - Fallback: si DB no disponible, queue local persiste en memoria hasta sincronizar.
-- Schema: tablas DEBEN incluir índices en (`session_id`, `ranking_id`, `career`) para queries rápidas.
-
----
-
-### `backend/embedding.py` — Embedding_Service
-
-**Responsabilidad:** Generar embeddings de texto (para afinidad y RAG), agnóstico de proveedor.
-
-**API Pública:**
-
-```python
-class EmbeddingService:
-    def __init__(
-        self,
-        provider: str,  # 'openai' | 'google' | 'huggingface' | 'local'
-        model: str,  # ej 'text-embedding-3-small', 'multilingual-MiniLM-L12-v2'
-        api_key: str | None = None,
-    ):
-        """
-        Inicializa servicio de embeddings.
-        
-        Args:
-            provider: Proveedor
-            model: Modelo específico
-            api_key: Clave API si aplica
-        
-        Comportamiento:
-        - Inicializa cliente del proveedor
-        - Valida que modelo sea soportado
-        """
-    
-    def embed(self, text: str) -> list[float]:
-        """
-        Genera embedding de texto.
-        
-        Args:
-            text: Texto a embedder (en español)
-        
-        Returns:
-            Vector numérico (dimensionalidad depende de modelo)
-        
-        Timeout:
-        - Máximo 2 segundos
-        
-        Errores:
-        - APIError si servicio externo falla
-        - Fallback: si disponible, usar cache de embeddings previos
-        """
-    
-    def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        """
-        Genera embeddings para múltiples textos (optimizado).
-        
-        Args:
-            texts: Lista de textos
-        
-        Returns:
-            Lista de vectores (mismo orden que inputs)
-        
-        Comportamiento:
-        - Agrupa requests en batches si proveedor lo soporta
-        - Más rápido que embed() llamado iterativamente
-        """
-    
-    def similarity(self, vec1: list[float], vec2: list[float]) -> float:
-        """
-        Calcula similitud coseno entre dos vectores.
-        
-        Returns:
-            float [0.0, 1.0]
-        
-        Comportamiento:
-        - Si vectores tienen dimensiones diferentes, fallar explícitamente
-        - Normalmente no falla; es operación local
-        """
-```
-
-**Notas de comportamiento:**
-- Embedding Service es inyectable en RAG_Module y Scoring_Engine (para afinidad).
-- Para demo, usar open-source local (Hugging Face) para evitar costos/dependencias externas.
+- Schema: índices en (session_id, ranking_id, career) para queries rápidas.
 
 ---
 
 ### `backend/orchestration.py` — Orchestration_Layer
 
-**Responsabilidad:** Orquestar flujo completo: autenticación → interpretación → evaluación → explicación → persistencia. Manejar errores y fallback.
+**Responsabilidad:** Orquestar flujo completo: autenticación → interpretación (Bloques A/B/C) → evaluación → explicación → persistencia. Manejar errores y fallback.
 
 **API Pública:**
 
@@ -1123,121 +1338,173 @@ class EmbeddingService:
 class Orchestration:
     def __init__(
         self,
-        auth_service: AuthService,
-        session_manager: SessionManager,
-        llm_service: LLMService,
-        scoring_engine: ScoringEngine,
-        rag_module: RAGModule,
-        feedback_storage: FeedbackStorage,
-        affinity_calculator: Callable,  # Función para calcular afinidad
+        auth_service,
+        session_manager,
+        llm_service,
+        scoring_engine,
+        rag_module,
+        feedback_storage,
     ):
-        """Inyecta todas las dependencias."""
+        """Inyecta todas las dependencias del sistema."""
     
     def handle_chat(
         self,
         session_token: str,
         message: str,
-        metadata: dict | None = None,  # {region, budget_max, institution_type, ...}
-    ) -> ChatResponse:
+        metadata: dict | None = None,
+    ) -> dict:
         """
-        Maneja una solicitud de chat completa.
+        Maneja solicitud de chat completa (entrypoint principal).
         
         Args:
-            session_token: Token de sesión
-            message: Mensaje del usuario
-            metadata: Filtros opcionales
+            session_token: Token de sesión (validado por HTTP layer)
+            message: Mensaje del usuario en español
+            metadata: Filtros opcionales {region, budget_max, institution_type}
         
         Returns:
             ChatResponse:
             {
-                status: "success" | "error",
-                conversation: {
-                    turn: int,
-                    bot_message: str,
-                    requires_follow_up: bool
+                "status": "success" | "error",
+                "conversation": {
+                    "turn": int,
+                    "bot_message": str,
+                    "requires_follow_up": bool
                 },
-                ranking: {
-                    status: "ready" | "awaiting_info",
-                    top_3: [
+                "ranking": {
+                    "status": "ready" | "awaiting_info",
+                    "top_5": [
                         {
-                            rank: 1,
-                            career: str,
-                            institution: str,
-                            concordancia_score: float,
-                            monthly_income: float,
-                            annual_cost: float,
-                            admission_rate: float,
-                            explanation: str
+                            "rank": 1,
+                            "career": str,
+                            "institution": str,
+                            "concordancia_score": float,
+                            "monthly_income": float,
+                            "annual_cost": float,
+                            "admission_rate": float,
+                            "duration_years": float,
+                            "explanation": str
                         },
                         ...
                     ]
                 },
-                rag_available_for: list[str],
-                ranking_id: str | None,
-                error_message: str | None
+                "rag_available_for": list[str],
+                "ranking_id": str | None,
+                "error_message": str | None
             }
         
-        Flujo:
-        1. Validar session_token con AuthService
-           → Si inválido, retornar HTTP 401 (Orchestration no lanza exception; retorna status)
+        Flujo detallado:
         
-        2. Recuperar contexto de sesión
-           → Si no existe, crear nuevo
+        1. VALIDAR TOKEN
+           auth_service.validate_token(session_token)
+           → Si inválido: retorna {status: "error", error_message: "Token inválido"}
         
-        3. Interpretar preferencias con LLMService
-           → Si LLM falla, retornar error pero no fallar completamente
+        2. RECUPERAR SESIÓN
+           context = session_manager.get_context(session_id)
+           → Si no existe: crear nuevo vacío
+           → Agregar message a conversation_history
         
-        4. Actualizar perfil y calcular confidence
+        3. DETERMINAR BLOQUE ACTIVO
+           - Si riasec_scores incompleto: BLOQUE A
+           - Elif pesos no priorizados: BLOQUE B
+           - Elif filtros no definidos: BLOQUE C
+           - Else: proceder a SCORING
         
-        5. IF confidence >= 0.70:
-               a. Calcular afinidad para todas las carreras
-               b. Invocar ScoringEngine para ranking
-               c. Generar explicaciones
-               d. Persistir en FeedbackStorage (sin validación usuario aún)
-               e. Retornar Top-3 con status="ready"
+        4. INTERPRETAR BLOQUE ACTIVO
+           Si BLOQUE A:
+               result_a = llm_service.interpret_bloque_a(message, history)
+               Actualizar profile.riasec_scores con result_a
+               Recalcular profile.riasec_code
+           
+           Si BLOQUE B:
+               result_b = llm_service.interpret_bloque_b(message, history)
+               Si result_b['priority_order']: 
+                   weights = calculate_weights_from_ranking(result_b['priority_order'])
+                   Actualizar profile.w_*, validar con validate_weights()
+               Elif result_b['explicit_weights']:
+                   Actualizar profile.w_*, validar
+           
+           Si BLOQUE C:
+               result_c = llm_service.interpret_bloque_c(message, history)
+               Actualizar profile.region, tipo_institucion, presupuesto_max, modalidad
+        
+        5. ACTUALIZAR CONTEXTO Y CALCULAR CONFIANZA
+           session_manager.update_profile(session_id, nuevos_datos)
+           confidence = session_manager.calculate_confidence(profile)
+           Incrementar turn_count
+        
+        6. EVALUAR AVANCE
+           
+           IF confidence >= 0.70:
+               → Proceder a SCORING
+           
+           ELIF turn_count >= 4:
+               → Proceder a SCORING (degradación controlada)
+               → Loguar {graceful_degradation: true}
+           
            ELSE:
-               a. Generar pregunta seguimiento
-               b. Retornar con status="awaiting_info", requires_follow_up=true
+               → Generar pregunta seguimiento
+               → Retornar {status: "success", requires_follow_up: true, bot_message: "¿...?"}
         
-        6. Si Orchestration alcanza max_dialogue_turns (4), forzar ranking
-           con información disponible (graceful degradation)
+        7. SCORING (si avanza)
+           
+           a. Calcular afinidades:
+              affinity_scores = [
+                  scoring_engine.calculate_affinity(profile.riasec_code, carrera['riasec_profile'])
+                  for carrera in features_df
+              ]
+           
+           b. Calcular ranking completo:
+              ranked = scoring_engine.rank_and_filter(profile, features_df)
+           
+           c. Extraer Top-5:
+              top_5 = scoring_engine.get_top_n(ranked, 5)
+           
+           d. Generar explicaciones:
+              for item in top_5:
+                  explanation = llm_service.generate_explanation(
+                      rank=item['rank'],
+                      career=item['career_name'],
+                      institution=item['institution'],
+                      score=item['concordancia_score'],
+                      scores_by_criterion=item['scores_by_criterion'],
+                      user_profile=profile,
+                      verifiable_data=item['verifiable_data']
+                  )
+                  item['explanation'] = explanation
+           
+           e. Persistir:
+              ranking_id = feedback_storage.save_ranking(
+                  session_id,
+                  user_input=message,
+                  profile_interpreted=profile.to_dict(),
+                  weights_generated=profile.weights_dict(),
+                  ranking_generated=top_5,
+                  timestamp=now()
+              )
+           
+           f. Obtener carreras con RAG:
+              rag_available = [
+                  item['career_name'] for item in top_5
+                  if rag_module.is_career_available(item['career_name'])
+              ]
+           
+           g. Retornar:
+              {
+                  "status": "success",
+                  "conversation": {bot_message: "Te recomendamos...", requires_follow_up: false},
+                  "ranking": {status: "ready", top_5: top_5},
+                  "rag_available_for": rag_available,
+                  "ranking_id": ranking_id
+              }
         
-        Errores capturados:
-        - LLMError → loguear, retornar error pero no fallar
-        - ScoringError → loguear, retornar error
-        - EmbeddingError (para afinidad) → loguear, usar afinidad fallback (0.5)
-        - DBError (Feedback) → loguear, queue local, continuar
+        Manejo de errores:
+        - LLM interpreta inválido (3 reintentos): continúa con lo que tiene, incrementa turn_count
+        - Scoring falla (features_df vacío): retorna error HTTP 500
+        - Embedding falla (para afinidad): afinidad = 0.5 (fallback)
+        - Feedback persist falla: queue local, continúa
         
         Timeout:
-        - Total máximo 5 segundos
-        """
-    
-    def handle_rag_query(
-        self,
-        session_token: str,
-        career: str,
-        question: str,
-    ) -> RagResponse:
-        """
-        Maneja consulta RAG sobre detalles de carrera.
-        
-        Args:
-            session_token: Token validado
-            career: Nombre de carrera recomendada
-            question: Pregunta del usuario
-        
-        Returns:
-            RagResponse (definida en rag.py)
-        
-        Comportamiento:
-        - Valida token
-        - Verifica que career está en ranking previo del usuario
-          (seguridad: usuario no puede preguntar de carreras random)
-        - Invoca RAGModule.query()
-        - Si RAG no disponible, retorna mensaje amigable
-        
-        Timeout:
-        - Máximo 2 segundos
+        - Total máximo 8 segundos (incluye LLM, scoring, persistencia)
         """
     
     def handle_feedback(
@@ -1247,7 +1514,7 @@ class Orchestration:
         validation_score: int,
         selected_career: str | None = None,
         notes: str | None = None,
-    ) -> FeedbackResponse:
+    ) -> dict:
         """
         Maneja validación del usuario.
         
@@ -1258,324 +1525,208 @@ class Orchestration:
             selected_career, notes: Opcionales
         
         Returns:
-            FeedbackResponse:
             {
-                status: "success" | "error",
-                message: str
+                "status": "success" | "error",
+                "message": str
             }
         
-        Comportamiento:
-        - Valida token
-        - Verifica que ranking_id pertenece a esa sesión
-        - Valida validation_score ∈ [1, 5]
-        - Persiste en FeedbackStorage
-        - Retorna éxito o error
+        Lógica:
+        1. Validar score ∈ [1, 5]
+           → Si no: retorna {status: "error", message: "Score inválido"}
         
-        Errores:
-        - Invalid score → HTTP 422
-        - ranking_id no pertenece a sesión → HTTP 403
-        - DB error → HTTP 500 (pero continuar)
+        2. Verificar que ranking_id pertenece a session_id
+           (security: usuario no puede validar ranking de otro)
+           ranking = feedback_storage.get_ranking_by_id(ranking_id)
+           → Si ranking.session_id ≠ session_id: error
+        
+        3. Persistir validación:
+           feedback_storage.update_validation(
+               ranking_id,
+               validation_score,
+               selected_career,
+               notes,
+               timestamp=now()
+           )
+        
+        4. Retornar éxito
+        """
+    
+    def handle_rag_query(
+        self,
+        session_token: str,
+        career: str,
+        question: str,
+    ) -> dict:
+        """
+        Maneja consulta RAG sobre detalles de carrera.
+        
+        Args:
+            session_token: Token validado
+            career: Nombre de carrera recomendada
+            question: Pregunta del usuario
+        
+        Returns:
+            {
+                "status": "success" | "no_documents" | "error",
+                "answer": str,
+                "sources": list[str],
+                "confidence": float
+            }
+        
+        Lógica:
+        1. Verificar que career está en ranking previo del usuario
+           (security: usuario no puede consultar carreras random)
+           session_context = session_manager.get_context(session_id)
+           → Si ranking_history vacío o career no está: error
+        
+        2. Invocar RAG:
+           response = rag_module.query(career, question, top_k=3)
+        
+        3. Retornar respuesta (incluso si status="no_documents")
         """
 ```
 
 **Notas de comportamiento:**
-- Orchestration NO lanza excepciones al caller; retorna respuestas estructuradas con status.
-- Errores son loguedos completamente para auditoría y debugging.
-- Fallback en afinidad, explicación, etc., permiten degradación controlada.
+- Orchestration **NO lanza excepciones** al caller; retorna respuestas estructuradas con status.
+- Errores loguedos completamente (para auditoría, sin PII).
+- Fallbacks permiten degradación controlada en cada paso.
 
 ---
 
-### `backend/app.py` — Punto de Entrada FastAPI
-
-**Responsabilidad:** Exponer endpoints REST, validar requests, retornar respuestas JSON.
-
-**API Pública:**
+### `backend/app.py` — FastAPI Entrypoint (Fargate)
 
 ```python
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import JSONResponse
+import logging
 
-app = FastAPI(title="CareerMatch Perú API")
+app = FastAPI(title="CareerMatch Perú Agent API")
+logger = logging.getLogger("careermatch")
 
-# Dependencia para extracción de token
+# Variable global (inicializada en startup)
+orchestration = None
+
 def get_session_token(request: Request) -> str:
-    """Extrae session_token del header Authorization o querystring."""
+    """Extrae session_token del header Authorization."""
     auth_header = request.headers.get("Authorization", "")
-    if auth_header.startswith("Bearer "):
-        return auth_header[7:]
-    token = request.query_params.get("session_token")
-    if not token:
-        raise HTTPException(status_code=401, detail="Token requerido")
-    return token
-
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authorization header requerido")
+    return auth_header[7:]
 
 @app.post("/chat")
 async def endpoint_chat(
-    request: ChatRequest,
+    request: dict,  # {message, metadata}
     session_token: str = Depends(get_session_token),
-) -> ChatResponse:
+) -> dict:
     """
     POST /chat
     
-    Request:
-    {
-        "message": "string (consulta del usuario)",
-        "metadata": {
-            "region": "string | null",
-            "budget_max": "float | null",
-            "institution_type": "string | null"
-        }
-    }
-    
-    Response:
-    {
-        "status": "success" | "error",
-        "conversation": {...},
-        "ranking": {...},
-        "rag_available_for": [...],
-        "ranking_id": "string | null",
-        "error_message": "string | null"
-    }
-    
-    HTTP Status:
-    - 200: Éxito (independientemente de status en JSON)
-    - 401: Token inválido/expirado
-    - 500: Error servidor
-    
-    Comportamiento:
-    - Valida token
-    - Delega a orchestration.handle_chat()
-    - Retorna ChatResponse
-    - Logs: request, response (sin tokens)
+    Delega a orchestration.handle_chat() y retorna respuesta.
+    HTTP 200 siempre (status en JSON), 401 si token inválido.
     """
     try:
-        response = orchestration.handle_chat(session_token, request.message, request.metadata)
+        response = orchestration.handle_chat(
+            session_token,
+            request.get("message"),
+            request.get("metadata")
+        )
         return response
     except Exception as e:
-        logger.error(f"Error en /chat: {e}", extra={"session_token": session_token})
-        return ChatResponse(status="error", error_message=str(e))
-
+        logger.error(f"Error en /chat: {e}", exc_info=True)
+        return {"status": "error", "error_message": "Error interno del servidor"}
 
 @app.post("/feedback")
 async def endpoint_feedback(
-    request: FeedbackRequest,
+    request: dict,  # {ranking_id, validation_score, ...}
     session_token: str = Depends(get_session_token),
-) -> FeedbackResponse:
+) -> dict:
     """
     POST /feedback
     
-    Request:
-    {
-        "ranking_id": "string",
-        "validation_score": 1–5,
-        "selected_career": "string | null",
-        "notes": "string | null"
-    }
-    
-    Response:
-    {
-        "status": "success" | "error",
-        "message": "string"
-    }
-    
-    HTTP Status:
-    - 200: Éxito
-    - 401: Token inválido
-    - 422: validation_score fuera de rango
-    - 403: ranking_id no pertenece a sesión
-    - 500: Error servidor
+    Delega a orchestration.handle_feedback().
+    HTTP 422 si validation_score fuera de rango.
     """
     try:
-        if not (1 <= request.validation_score <= 5):
-            raise HTTPException(status_code=422, detail="validation_score debe estar entre 1 y 5")
+        score = request.get("validation_score")
+        if not (1 <= score <= 5):
+            raise HTTPException(status_code=422, detail="Score debe estar entre 1 y 5")
+        
         response = orchestration.handle_feedback(
             session_token,
-            request.ranking_id,
-            request.validation_score,
-            request.selected_career,
-            request.notes
+            request.get("ranking_id"),
+            score,
+            request.get("selected_career"),
+            request.get("notes")
         )
         return response
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error en /feedback: {e}")
-        return FeedbackResponse(status="error", message=str(e))
-
+        logger.error(f"Error en /feedback: {e}", exc_info=True)
+        return {"status": "error", "message": "Error interno"}
 
 @app.post("/rag")
 async def endpoint_rag(
-    request: RagRequest,
+    request: dict,  # {career, question}
     session_token: str = Depends(get_session_token),
-) -> RagResponse:
+) -> dict:
     """
     POST /rag
     
-    Request:
-    {
-        "career": "string",
-        "question": "string"
-    }
-    
-    Response:
-    {
-        "answer": "string",
-        "sources": ["string"],
-        "confidence": float,
-        "status": "success" | "no_documents" | "error"
-    }
-    
-    HTTP Status:
-    - 200: Éxito (incluso si status="no_documents")
-    - 401: Token inválido
-    - 500: Error servidor
+    Delega a orchestration.handle_rag_query().
     """
     try:
-        response = orchestration.handle_rag_query(session_token, request.career, request.question)
+        response = orchestration.handle_rag_query(
+            session_token,
+            request.get("career"),
+            request.get("question")
+        )
         return response
     except Exception as e:
-        logger.error(f"Error en /rag: {e}")
-        return RagResponse(status="error", answer="", sources=[])
+        logger.error(f"Error en /rag: {e}", exc_info=True)
+        return {"status": "error", "answer": "", "sources": []}
 
-
-# Startup: Inicializar componentes
 @app.on_event("startup")
 async def startup():
-    global orchestration, logger
-    auth_service = AuthService()
-    session_manager = SessionManager()
-    llm_service = LLMService(
-        provider=os.getenv("LLM_PROVIDER", "gemini"),
-        model=os.getenv("LLM_MODEL", "gemini-1.5-flash"),
-        api_key=os.getenv("LLM_API_KEY")
-    )
-    scoring_engine = ScoringEngine(
-        features_csv_path="data/features.csv",
-        config_json_path="data/feature_config.json"
-    )
-    embedding_service = EmbeddingService(
-        provider=os.getenv("EMBEDDING_PROVIDER", "huggingface"),
-        model=os.getenv("EMBEDDING_MODEL", "sentence-transformers/multilingual-MiniLM-L12-v2")
-    )
-    rag_module = RAGModule(
-        vector_db_type=os.getenv("VECTOR_DB_TYPE", "faiss"),
-        embedding_service=embedding_service
-    )
-    feedback_storage = FeedbackStorage(
-        db_url=os.getenv("DATABASE_URL", "sqlite:///feedback.db")
-    )
-    affinity_calculator = calculate_affinity  # Función a definir en scoring
+    """Inicializa componentes al levantarse el servidor."""
+    global orchestration
     
-    orchestration = Orchestration(
-        auth_service,
-        session_manager,
-        llm_service,
-        scoring_engine,
-        rag_module,
-        feedback_storage,
-        affinity_calculator
-    )
-    logger = logging.getLogger("careermatch")
+    # Inicializar servicios...
+    # (código de inicialización)
+    
+    logger.info("Orquestador iniciado correctamente")
 ```
 
 ---
 
-### `frontend/index.html` y `frontend/app.js` — Web_Interface
-
-**Responsabilidad:** Proporcionar interfaz conversacional responsiva, manejar tokens de sesión, renderizar rankings y permitir validación.
-
-**HTML Estructura (conceptual):**
-
-```html
-<!DOCTYPE html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CareerMatch Perú</title>
-    <link rel="stylesheet" href="styles.css">
-</head>
-<body>
-    <div id="app">
-        <!-- Pantalla de inicio / login (si requerido) -->
-        <div id="welcome-screen" class="screen">
-            <h1>CareerMatch Perú</h1>
-            <p>Orienta tu futuro académico con IA</p>
-            <button id="btn-start">Comenzar conversación</button>
-        </div>
-        
-        <!-- Pantalla de chat -->
-        <div id="chat-screen" class="screen hidden">
-            <div id="chat-container">
-                <div id="messages"></div>
-                <div id="input-area">
-                    <input type="text" id="chat-input" placeholder="Escribe tu consulta...">
-                    <button id="btn-send">Enviar</button>
-                </div>
-            </div>
-        </div>
-        
-        <!-- Pantalla de resultados -->
-        <div id="results-screen" class="screen hidden">
-            <div id="ranking-container"></div>
-            <button id="btn-new-query">Nueva consulta</button>
-        </div>
-    </div>
-    
-    <script src="app.js"></script>
-</body>
-</html>
-```
-
-**API del Frontend:**
+### `frontend/app.js` — Gestor de Aplicación (JavaScript)
 
 ```javascript
-// app.js - Gestor de aplicación
-
 class CareerMatchApp {
     constructor() {
         this.sessionToken = null;
-        this.sessionId = null;
-        this.rankingId = null;
         this.baseUrl = "http://localhost:8000"; // O URL de servidor
     }
 
     async init() {
-        // Verificar si hay sesión previa en localStorage
         this.sessionToken = localStorage.getItem("session_token");
-        
         if (!this.sessionToken) {
-            // Crear nueva sesión
-            await this.createSession();
+            // Crear sesión en backend Lambda (no implementado en esta sección)
+            // Por ahora, usar stub
+            await this.createSessionStub();
         }
-        
         this.attachEventListeners();
-        this.showScreen("welcome");
     }
 
-    async createSession() {
-        try {
-            // Llamada a endpoint de creación (a definir en backend)
-            const response = await fetch(`${this.baseUrl}/session/create`, {
-                method: "POST"
-            });
-            const data = await response.json();
-            
-            this.sessionToken = data.session_token;
-            this.sessionId = data.session_id;
-            
-            localStorage.setItem("session_token", this.sessionToken);
-            localStorage.setItem("session_id", this.sessionId);
-        } catch (error) {
-            console.error("Error creando sesión:", error);
-            this.showError("No se pudo iniciar sesión. Intenta recargar la página.");
-        }
+    async createSessionStub() {
+        // Stub: generar token local para demo
+        this.sessionToken = "token_" + Math.random().toString(36).substr(2, 9);
+        localStorage.setItem("session_token", this.sessionToken);
     }
 
     async sendMessage(message) {
         if (!message.trim()) return;
         
-        // Mostrar mensaje del usuario
         this.appendMessage(message, "user");
         
         try {
@@ -1587,651 +1738,754 @@ class CareerMatchApp {
                 },
                 body: JSON.stringify({
                     message: message,
-                    metadata: this.getMetadata()
+                    metadata: {}
                 })
             });
-            
-            if (response.status === 401) {
-                // Token expirado
-                this.handleSessionExpired();
-                return;
-            }
             
             const data = await response.json();
             
             if (data.status === "success") {
-                // Mostrar respuesta del bot
                 this.appendMessage(data.conversation.bot_message, "bot");
                 
                 if (data.ranking.status === "ready") {
-                    // Mostrar ranking
                     this.rankingId = data.ranking_id;
-                    this.displayRanking(data.ranking.top_3, data.rag_available_for);
-                    this.showScreen("results");
-                } else if (data.conversation.requires_follow_up) {
-                    // Esperar siguiente turno
-                    this.showScreen("chat");
+                    this.displayRanking(data.ranking.top_5);
                 }
             } else {
                 this.showError(data.error_message);
             }
         } catch (error) {
-            console.error("Error en /chat:", error);
-            this.showError("Error al procesar tu consulta. Intenta de nuevo.");
+            console.error("Error:", error);
+            this.showError("Error al procesar tu consulta");
         }
     }
 
-    async submitFeedback(validationScore) {
-        if (!this.rankingId) {
-            console.error("No hay ranking_id para feedback");
-            return;
-        }
-        
-        try {
-            const response = await fetch(`${this.baseUrl}/feedback`, {
-                method: "POST",
-                headers: {
-                    "Authorization": `Bearer ${this.sessionToken}`,
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                    ranking_id: this.rankingId,
-                    validation_score: validationScore
-                })
-            });
-            
-            const data = await response.json();
-            
-            if (data.status === "success") {
-                this.appendMessage("¡Gracias por tu feedback! 😊", "bot");
-            } else {
-                this.showError(data.message);
-            }
-        } catch (error) {
-            console.error("Error en /feedback:", error);
-        }
-    }
-
-    async queryRAG(career, question) {
-        try {
-            const response = await fetch(`${this.baseUrl}/rag`, {
-                method: "POST",
-                headers: {
-                    "Authorization": `Bearer ${this.sessionToken}`,
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                    career: career,
-                    question: question
-                })
-            });
-            
-            const data = await response.json();
-            
-            if (data.status === "success") {
-                this.appendMessage(data.answer, "bot");
-                if (data.sources.length > 0) {
-                    this.appendMessage(`Fuentes: ${data.sources.join(", ")}`, "system");
-                }
-            } else {
-                this.showError("Información detallada no disponible para esta carrera.");
-            }
-        } catch (error) {
-            console.error("Error en /rag:", error);
-        }
+    displayRanking(topN) {
+        // Renderizar Top-5 ranking con datos verificables
+        // Incluir botones Likert para feedback
     }
 
     appendMessage(text, role) {
-        const messagesDiv = document.getElementById("messages");
-        const msgDiv = document.createElement("div");
-        msgDiv.className = `message ${role}`;
-        msgDiv.textContent = text;
-        messagesDiv.appendChild(msgDiv);
-        messagesDiv.scrollTop = messagesDiv.scrollHeight;
-    }
-
-    displayRanking(topN, ragAvailable) {
-        const container = document.getElementById("ranking-container");
-        container.innerHTML = "";
-        
-        topN.forEach((rec, idx) => {
-            const html = `
-                <div class="ranking-item">
-                    <h3>${idx + 1}. ${rec.career} — ${rec.institution}</h3>
-                    <p class="score">Puntuación: ${(rec.concordancia_score * 100).toFixed(1)}/100</p>
-                    <div class="data">
-                        <p>💰 Ingresos: S/. ${rec.monthly_income}/mes</p>
-                        <p>💵 Costo: S/. ${rec.annual_cost}/año</p>
-                        <p>📊 Admisión: ${rec.admission_rate}%</p>
-                    </div>
-                    <p class="explanation">${rec.explanation}</p>
-                    ${ragAvailable.includes(rec.career) ? 
-                        `<button class="btn-rag" onclick="app.showRAGPanel('${rec.career}')">Ver detalles</button>` 
-                        : ''
-                    }
-                </div>
-```javascript
-            `;
-            container.innerHTML += html;
-        });
-        
-        // Agregar sección de validación Likert
-        const feedbackHtml = `
-            <div class="feedback-section">
-                <p>¿Qué tan útil fue la recomendación?</p>
-                <div class="likert-scale">
-                    <button class="likert-btn" data-score="1">1 - Poco útil</button>
-                    <button class="likert-btn" data-score="2">2 - Algo útil</button>
-                    <button class="likert-btn" data-score="3">3 - Neutral</button>
-                    <button class="likert-btn" data-score="4">4 - Muy útil</button>
-                    <button class="likert-btn" data-score="5">5 - Extremadamente útil</button>
-                </div>
-            </div>
-        `;
-        container.innerHTML += feedbackHtml;
-        
-        // Agregar event listeners a botones Likert
-        document.querySelectorAll(".likert-btn").forEach(btn => {
-            btn.addEventListener("click", () => {
-                const score = parseInt(btn.dataset.score);
-                this.submitFeedback(score);
-                btn.disabled = true;
-            });
-        });
-    }
-
-    showRAGPanel(career) {
-        const panel = document.createElement("div");
-        panel.className = "rag-panel";
-        panel.innerHTML = `
-            <div class="rag-content">
-                <h3>Detalles: ${career}</h3>
-                <input type="text" id="rag-question" placeholder="Pregunta sobre esta carrera...">
-                <button id="btn-rag-ask">Preguntar</button>
-                <div id="rag-response"></div>
-                <button id="btn-rag-close">Cerrar</button>
-            </div>
-        `;
-        document.body.appendChild(panel);
-        
-        document.getElementById("btn-rag-ask").addEventListener("click", () => {
-            const question = document.getElementById("rag-question").value;
-            if (question.trim()) {
-                this.queryRAG(career, question);
-            }
-        });
-        
-        document.getElementById("btn-rag-close").addEventListener("click", () => {
-            panel.remove();
-        });
-    }
-
-    handleSessionExpired() {
-        localStorage.removeItem("session_token");
-        localStorage.removeItem("session_id");
-        this.sessionToken = null;
-        this.showError("Tu sesión ha expirado. Por favor, recarga la página.");
-        setTimeout(() => location.reload(), 2000);
-    }
-
-    showScreen(screenName) {
-        document.querySelectorAll(".screen").forEach(s => s.classList.add("hidden"));
-        document.getElementById(`${screenName}-screen`).classList.remove("hidden");
-    }
-
-    showError(message) {
-        const errorDiv = document.createElement("div");
-        errorDiv.className = "error-message";
-        errorDiv.textContent = message;
-        document.body.appendChild(errorDiv);
-        setTimeout(() => errorDiv.remove(), 5000);
-    }
-
-    getMetadata() {
-        // Recuperar metadatos de filtros si están disponibles
-        return {
-            region: localStorage.getItem("filter_region") || null,
-            budget_max: parseFloat(localStorage.getItem("filter_budget")) || null,
-            institution_type: localStorage.getItem("filter_institution_type") || null
-        };
+        // Agregar mensaje al chat
     }
 
     attachEventListeners() {
-        document.getElementById("btn-start").addEventListener("click", () => {
-            this.showScreen("chat");
-        });
-        
-        document.getElementById("btn-send").addEventListener("click", () => {
-            const input = document.getElementById("chat-input");
-            this.sendMessage(input.value);
-            input.value = "";
-        });
-        
-        document.getElementById("chat-input").addEventListener("keypress", (e) => {
-            if (e.key === "Enter") {
-                document.getElementById("btn-send").click();
-            }
-        });
-        
-        document.getElementById("btn-new-query").addEventListener("click", () => {
-            this.rankingId = null;
-            this.showScreen("chat");
-            document.getElementById("messages").innerHTML = "";
-        });
+        // Event listeners para botones
     }
 }
-
-// Inicializar app al cargar
-document.addEventListener("DOMContentLoaded", () => {
-    window.app = new CareerMatchApp();
-    window.app.init();
-});
 ```
 
 ---
 
 ### `data_pipeline/ingestion.py` — Descarga Automatizada
 
-**Responsabilidad:** Descargar datos de Ponte en Carrera, generar snapshots versionados.
-
-**API Pública:**
-
 ```python
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+import shutil
+from pathlib import Path
+from datetime import datetime
+import logging
+
 class DataIngestion:
     def __init__(
         self,
-        minedu_url: str,
+        minedu_url: str = "https://ponte.minedu.gob.pe",
         output_dir: str = "data",
         snapshots_dir: str = "snapshots"
     ):
-        """
-        Inicializa ingestion.
-        
-        Args:
-            minedu_url: URL del portal (default: variableenv MINEDU_URL)
-            output_dir: Directorio para archivo principal
-            snapshots_dir: Directorio para histórico
-        """
+        """Inicializa ingestion con Selenium."""
+        self.minedu_url = minedu_url
+        self.output_dir = Path(output_dir)
+        self.snapshots_dir = Path(snapshots_dir)
+        self.logger = logging.getLogger(__name__)
     
     def download(self) -> str:
         """
-        Descarga archivo Excel de Ponte en Carrera usando Selenium.
+        Descarga archivo Excel de Ponte en Carrera.
         
         Returns:
-            Ruta al archivo descargado (data/raw.xlsx)
+            Ruta a data/raw.xlsx
         
-        Comportamiento:
-        - Abre navegador Chrome con opciones de descarga automática
-        - Navega a MINEDU_URL
-        - Ejecuta búsqueda (clic en btnBuscar)
-        - Ejecuta descarga de Excel (clic en descargarDondeEstudioExcel)
-        - Espera a que descarga complete (máximo 60 segundos)
-        - Copia archivo a data/raw.xlsx
-        - Genera snapshot en snapshots/raw/raw_YYYYMMDD_HHMMSS.xlsx
-        - Cierra navegador
-        
-        Timeout:
-        - Total operación: ≤ 120 segundos
-        - Espera descarga: ≤ 60 segundos
-        
-        Errores:
-        - TimeoutError si descarga no completa
-        - WebDriverException si Selenium falla
-        - FileNotFoundError si archivo esperado no aparece
+        Timeout: ≤ 120 segundos total
         """
+        options = webdriver.ChromeOptions()
+        options.add_argument("--no-sandbox")
+        prefs = {"download.default_directory": str(self.output_dir)}
+        options.add_experimental_option("prefs", prefs)
+        
+        driver = webdriver.Chrome(options=options)
+        
+        try:
+            driver.get(self.minedu_url)
+            wait = WebDriverWait(driver, 30)
+            
+            # Clic en "Buscar"
+            btn_buscar = wait.until(EC.element_to_be_clickable((By.ID, "btnBuscar")))
+            btn_buscar.click()
+            
+            # Esperar descarga
+            import time
+            time.sleep(5)  # Espera a que descargue
+            
+            # Clic en "Descargar"
+            btn_descargar = wait.until(
+                EC.element_to_be_clickable((By.ID, "descargarDondeEstudioExcel"))
+            )
+            btn_descargar.click()
+            
+            # Esperar archivo
+            time.sleep(10)
+            raw_file = self.output_dir / "raw.xlsx"
+            if raw_file.exists():
+                # Crear snapshot
+                self.create_snapshot(str(raw_file))
+                self.logger.info(f"Descarga completada: {raw_file}")
+                return str(raw_file)
+            else:
+                raise FileNotFoundError("Descarga no completó")
+        
+        finally:
+            driver.quit()
     
     def create_snapshot(self, source_file: str) -> str:
-        """
-        Crea snapshot versionado de archivo.
-        
-        Args:
-            source_file: Ruta a archivo origen
-        
-        Returns:
-            Ruta a snapshot creado (snapshots/raw/raw_YYYYMMDD_HHMMSS.xlsx)
-        
-        Comportamiento:
-        - Copia archivo a snapshots con timestamp
-        - Timestamp formato: YYYYMMDD_HHMMSS (UTC)
-        """
+        """Crea snapshot versionado."""
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        snapshot_path = self.snapshots_dir / "raw" / f"raw_{timestamp}.xlsx"
+        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(source_file, snapshot_path)
+        self.logger.info(f"Snapshot creado: {snapshot_path}")
+        return str(snapshot_path)
 ```
 
 ---
 
-### `data_pipeline/data_clean.py` — Limpieza y Estandarización
-
-**Responsabilidad:** Limpiar, validar y estandarizar datos crudos.
-
-**API Pública:**
+### `data_pipeline/data_clean.py` — Limpieza
 
 ```python
+import pandas as pd
+import logging
+
 class DataCleaner:
     def __init__(self, raw_file: str):
-        """Carga archivo Excel crudo (header=6)."""
+        """Carga archivo Excel (header=6)."""
+        self.df = pd.read_excel(raw_file, header=6)
+        self.logger = logging.getLogger(__name__)
     
-    def standardize_columns(self) -> DataFrame:
-        """
-        Renombra columnas a snake_case.
-        
-        Returns:
-            DataFrame con columnas estandarizadas
-        
-        Mapeo:
-            "N°" → "id"
-            "Familia Carrera" → "career_family"
-            "Carrera" → "career"
-            ... (ver Requerimiento 5)
-        """
+    def standardize_columns(self) -> pd.DataFrame:
+        """Renombra columnas a snake_case."""
+        mapping = {
+            "N°": "id",
+            "Familia Carrera": "career_family",
+            "Carrera": "career_name",
+            "Universidad": "institution",
+            # ... más mappings
+        }
+        self.df = self.df.rename(columns=mapping)
+        return self.df
     
-    def remove_empty_rows(self) -> DataFrame:
-        """
-        Elimina registros sin carrera o institución.
-        
-        Retorna DataFrame reducido con logging de cantidad eliminada.
-        """
+    def remove_empty_rows(self) -> pd.DataFrame:
+        """Elimina filas incompletas críticas."""
+        initial_count = len(self.df)
+        self.df = self.df.dropna(subset=["career_name", "institution"])
+        removed = initial_count - len(self.df)
+        self.logger.info(f"Filas removidas: {removed}")
+        return self.df
     
-    def convert_types(self) -> DataFrame:
-        """
-        Convierte columnas numéricas a tipos correctos.
-        
-        Usa pd.to_numeric(..., errors='coerce') para permitir NaN en inválidos.
-        """
+    def convert_types(self) -> pd.DataFrame:
+        """Convierte columnas numéricas."""
+        numeric_cols = ["duration_years", "monthly_income", "annual_cost", "admission_rate"]
+        for col in numeric_cols:
+            if col in self.df.columns:
+                self.df[col] = pd.to_numeric(self.df[col], errors="coerce")
+        return self.df
     
-    def clean(self) -> DataFrame:
-        """Ejecuta pipeline completo de limpieza."""
+    def clean(self) -> pd.DataFrame:
+        """Ejecuta pipeline completo."""
+        return (self
+                .standardize_columns()
+                .remove_empty_rows()
+                .convert_types())
     
     def save(self, output_path: str) -> None:
-        """Guarda DataFrame limpio a CSV (UTF-8-sig)."""
+        """Guarda CSV (UTF-8-sig)."""
+        self.df.to_csv(output_path, index=False, encoding="utf-8-sig")
+        self.logger.info(f"Guardado: {output_path}")
 ```
 
 ---
 
-### `data_pipeline/feature_engineering.py` — Imputación y Normalización
-
-**Responsabilidad:** Generar variables de scoring normalizadas, aplicar imputación jerárquica.
-
-**API Pública:**
+### `data_pipeline/feature_engineering.py` — Normalización
 
 ```python
+import pandas as pd
+import numpy as np
+import json
+import logging
+from pathlib import Path
+from datetime import datetime
+
 class FeatureEngineer:
     def __init__(self, cleaned_csv: str, config_path: str = "data/feature_config.json"):
-        """
-        Inicializa ingeniero de features.
-        
-        Args:
-            cleaned_csv: data/filtered.csv
-            config_path: Ruta a configuración (se crea si no existe)
-        """
+        """Inicializa ingeniero de features."""
+        self.df = pd.read_csv(cleaned_csv)
+        self.config_path = config_path
+        self.logger = logging.getLogger(__name__)
+        self.config = self._load_config()
     
-    def create_imputation_flags(self) -> DataFrame:
-        """
-        Crea flags booleanos para variables que serán imputadas.
-        
-        Lógica (Requerimiento 6 criterio 3):
-            duration_imputed_flag = (duration_years <= 0) OR (duration_years > 10) OR (isna)
-            monthly_income_imputed_flag = (monthly_income <= 0) OR (isna)
-            annual_cost_imputed_flag = (annual_cost <= 0) OR (isna)
-            admission_rate_imputed_flag = (admission_rate <= 0) OR (admission_rate > 90) OR (isna)
-        """
+    def _load_config(self) -> dict:
+        """Carga o crea config de imputación."""
+        if Path(self.config_path).exists():
+            with open(self.config_path, "r") as f:
+                return json.load(f)
+        return {
+            "duration_years_fallback": 4.0,
+            "monthly_income_fallback": 2500.0,
+            "annual_cost_fallback": 1000.0,
+            "admission_rate_fallback": 30.0
+        }
     
-    def hierarchical_imputation(self) -> DataFrame:
-        """
-        Ejecuta imputación en cascada para 4 variables clave.
+    def create_imputation_flags(self) -> pd.DataFrame:
+        """Crea flags para variables a imputar."""
+        self.df["duration_imputed_flag"] = (
+            (self.df["duration_years"] <= 0) |
+            (self.df["duration_years"] > 10) |
+            (self.df["duration_years"].isna())
+        ).astype(int)
         
-        Para cada variable:
-        1. Nivel 1: mediana por (career_family, institution_type)
-        2. Nivel 2: mediana por career_family
-        3. Nivel 3: fallback desde feature_config.json
+        self.df["income_imputed_flag"] = (
+            (self.df["monthly_income"] <= 0) |
+            (self.df["monthly_income"].isna())
+        ).astype(int)
         
-        Retorna DataFrame con columnas *_imputed para cada variable.
-        """
+        # ... más flags
+        
+        return self.df
     
-    def validate_ranges(self) -> DataFrame:
-        """
-        Valida rangos tras imputación, reajusta si necesario.
+    def hierarchical_imputation(self) -> pd.DataFrame:
+        """Imputación en cascada (familia → fallback)."""
+        for col in ["duration_years", "monthly_income", "annual_cost"]:
+            # Nivel 1: mediana por family
+            family_medians = self.df.groupby("career_family")[col].median()
+            
+            # Nivel 2: fallback desde config
+            fallback = self.config[f"{col}_fallback"]
+            
+            self.df[f"{col}_imputed"] = self.df[col].fillna(
+                self.df["career_family"].map(family_medians).fillna(fallback)
+            )
         
-        Rangos (Requerimiento 6 criterio 4):
-            - duration_years: [3, 7]
-            - admission_rate: [0, 90]
-            - monthly_income: > 0
-            - annual_cost: >= 0
-        """
+        return self.df
     
-    def normalize_features(self) -> DataFrame:
-        """
-        Genera 4 variables de scoring normalizadas [0,1].
+    def validate_ranges(self) -> pd.DataFrame:
+        """Valida y ajusta rangos."""
+        self.df["duration_imputed"] = self.df["duration_imputed"].clip(3, 7)
+        self.df["admission_rate_imputed"] = self.df["admission_rate_imputed"].clip(0, 90)
+        return self.df
+    
+    def normalize_features(self) -> pd.DataFrame:
+        """Genera 4 variables normalizadas [0,1]."""
+        # income_score = MinMax(log1p(income))
+        self.df["income_score"] = (
+            np.log1p(self.df["monthly_income_imputed"])
+        )
+        self.df["income_score"] = (
+            (self.df["income_score"] - self.df["income_score"].min()) /
+            (self.df["income_score"].max() - self.df["income_score"].min())
+        )
         
-        income_score = MinMax(log1p(monthly_income_imputed))
-        cost_score = 1 - MinMax(log1p(annual_cost_imputed))
-        duration_score = 1 - MinMax(duration_years_imputed)
-        admission_score = MinMax(admission_rate_imputed)
+        # cost_score = 1 - MinMax(log1p(cost))
+        cost_log = np.log1p(self.df["annual_cost_imputed"])
+        self.df["cost_score"] = (
+            1 - ((cost_log - cost_log.min()) / (cost_log.max() - cost_log.min()))
+        )
         
-        donde MinMax(x) = (x - min(x)) / (max(x) - min(x))
+        # duracion_score = 1 - MinMax(duration)
+        duration = self.df["duration_imputed"]
+        self.df["duracion_score"] = (
+            1 - ((duration - duration.min()) / (duration.max() - duration.min()))
+        )
         
-        Retorna DataFrame con columnas *_score agregadas.
-        """
+        # admission_score = MinMax(admission)
+        admission = self.df["admission_rate_imputed"]
+        self.df["admission_score"] = (
+            (admission - admission.min()) / (admission.max() - admission.min())
+        )
+        
+        return self.df
     
     def save_features(self, output_path: str) -> None:
-        """Guarda features a CSV (UTF-8-sig)."""
+        """Guarda features a CSV."""
+        self.df.to_csv(output_path, index=False, encoding="utf-8-sig")
+        self.logger.info(f"Features guardadas: {output_path}")
     
     def save_config(self) -> None:
-        """Persiste feature_config.json."""
+        """Persiste config JSON."""
+        with open(self.config_path, "w") as f:
+            json.dump(self.config, f, indent=2)
     
     def create_snapshot(self) -> None:
-        """Genera snapshots en snapshots/features y snapshots/configs."""
+        """Genera snapshots versionados."""
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        
+        features_snapshot = Path("snapshots/features") / f"features_{timestamp}.csv"
+        features_snapshot.parent.mkdir(parents=True, exist_ok=True)
+        self.df.to_csv(features_snapshot, index=False, encoding="utf-8-sig")
+        
+        config_snapshot = Path("snapshots/configs") / f"config_{timestamp}.json"
+        config_snapshot.parent.mkdir(parents=True, exist_ok=True)
+        with open(config_snapshot, "w") as f:
+            json.dump(self.config, f, indent=2)
     
-    def run_pipeline(self) -> DataFrame:
-        """Ejecuta pipeline completo: flags → imputación → validación → normalización."""
+    def run_pipeline(self) -> pd.DataFrame:
+        """Ejecuta pipeline completo."""
+        return (self
+                .create_imputation_flags()
+                .hierarchical_imputation()
+                .validate_ranges()
+                .normalize_features())
 ```
 
 ---
 
-## Modelos de Datos
+## 15. Checklist de Implementación Consolidado
 
-### UserProfile
+- [ ] Implementar `backend/embedding.py` (Bedrock Titan)
+- [ ] Implementar `backend/llm_service.py` (Bedrock Claude-3.5-Sonnet, 3 bloques)
+- [ ] Implementar `backend/scoring.py` (5 criterios, Top-5, determinístico)
+- [ ] Implementar `backend/rag.py` (pgvector/Aurora)
+- [ ] Implementar `backend/feedback.py` (Aurora PostgreSQL)
+- [ ] Implementar `backend/orchestration.py` (flujo A/B/C, transiciones, degradación)
+- [ ] Implementar `backend/app.py` (FastAPI Fargate entrypoint)
+- [ ] Implementar `frontend/app.js` (gestor conversacional JS)
+- [ ] Implementar `data_pipeline/ingestion.py` (Selenium Ponte en Carrera)
+- [ ] Implementar `data_pipeline/data_clean.py` (estandarización)
+- [ ] Implementar `data_pipeline/feature_engineering.py` (normalización, imputación)
+- [ ] Tests de propiedades: Determinismo, Reproducibilidad, Confidence Monótono, Pesos Válidos
+---
+# Modelos de Datos (Actualizado)
+
+## Modelos Principales
+
+### `StudentProfile` (Bloques A, B, C)
 
 ```python
-class UserProfile:
-    """Perfil interpretado del usuario tras conversación."""
-    interests: list[str]  # ["matemáticas", "análisis de datos"]
-    salary_priority: float  # [0, 1]
-    cost_sensitivity: float  # [0, 1]
-    admission_tolerance: float  # [0, 1]
-    geographic_preference: str | None  # "Lima" o None
-    institution_type_preference: str | None  # "pública", "privada", "cualquiera" o None
-    confidence_score: float  # [0, 1]
+class StudentProfile:
+    """Perfil interpretado del estudiante tras conversación (Bloques A/B/C)."""
+    
+    # Bloque A — RIASEC (Etapa 1: gathering_info)
+    riasec_scores: dict[str, int]  # {"R": 8, "I": 9, "A": 7, "S": 6, "E": 5, "C": 4} [1,10]
+    riasec_code: str | None  # 3 letras, ej "RIA", calculado desde riasec_scores
+    
+    # Bloque B — pesos dinámicos (Etapa 2), suman 1.0
+    w_afinidad: float     # [0,1], peso criterio afinidad RIASEC
+    w_ingreso: float      # [0,1], peso criterio ingresos esperados
+    w_costo: float        # [0,1], peso criterio costo
+    w_admision: float     # [0,1], peso criterio selectividad admisión
+    w_duracion: float     # [0,1], peso criterio duración en años
+    
+    # Bloque C — filtros duros (no pesan, descartan)
+    region: str | None                  # Región de Perú (None = "me da igual")
+    tipo_institucion: str | None        # 'publica' | 'privada' | None
+    presupuesto_max: float | None       # Máximo costo anual (soles)
+    modalidad: str | None               # 'presencial' | 'virtual' | None
+    
+    # Datos adicionales contextuales
+    interests: list[str]        # Áreas de interés mencionadas (ej ["matemáticas", "análisis"])
+    strengths: list[str]        # Fortalezas percibidas (ej ["lógica", "resolución problemas"])
+    preferred_fields: list[str] # Campos específicos preferidos (ej ["data science"])
+    dislikes: list[str]         # Áreas de rechazo (ej ["memorización"])
+    
+    # Estado del perfil
+    confidence_score: float  # [0,1], calculado por calculate_confidence()
     confidence_reasoning: str  # Explicación de baja confianza si aplica
+```
 
+**Defaults (degradación controlada):**
+- Si Bloque B no se prioriza tras 4 repreguntas: cada peso = `0.2` (suma 1.0).
+- Si usuario dice "no me importa X": ese peso = `0` y se re-normaliza resto sumando 1.0.
+- Si usuario no menciona aspecto: campo = `None`.
 
-class InterpretationResult:
-    """Resultado de interpretación de LLM."""
-    interests: list[str]
-    salary_priority: float
-    cost_sensitivity: float
-    admission_tolerance: float
-    geographic_preference: str | None
-    institution_type_preference: str | None
-    missing_info: list[str]  # ["geographic_preference", "institution_type_preference"]
-    confidence_score: float
-    confidence_reasoning: str
-    suggested_follow_up: str | None
-    raw_llm_response: str  # Para auditoría
+---
 
+### `CareerFeature` (fila de `features.csv`)
 
+```python
+class CareerFeature:
+    """Carrera-Universidad individual con features normalizadas."""
+    
+    career_id: str  # Identificador único
+    career_name: str  # Nombre de carrera (ej "Estadística")
+    institution: str  # Universidad que ofrece
+    region: str  # Región donde está la universidad
+    tipo_institucion: str  # 'publica' | 'privada'
+    
+    # RIASEC etiquetado (Bedrock + validación muestral)
+    riasec_profile: str  # 3 letras, ej "RIA"
+    riasec_source: str  # 'seed' | 'llm_tagged' | 'family_fallback' | 'pending'
+    
+    # Features normalizadas [0,1] para scoring
+    ingreso_norm: float  # MinMax(log1p(ingreso_promedio))
+    costo_norm: float    # MinMax(log1p(costo_mensualidad))
+    selectividad_norm: float  # MinMax(tasa_admision) — mayor=más selectivo
+    duracion_norm: float  # MinMax(duracion_anios)
+    
+    # Datos verificables (del MINEDU)
+    ingreso_promedio: float  # S/. / mes (dato crudo)
+    costo_mensualidad: float  # S/. (dato crudo)
+    tasa_admision: float  # % (dato crudo)
+    duracion_anios: float  # Años (dato crudo)
+```
+
+---
+
+### `RankingItem` (item en el ranking Top-5)
+
+```python
 class RankingItem:
-    """Un item en el ranking."""
-    rank: int  # 1, 2, 3
-    career: str
-    institution: str
-    concordancia_score: float  # [0, 1]
-    scores_by_criterion: dict  # {affinity: 0.85, salary: 0.82, cost: 0.90, admission: 0.60}
-    verifiable_data: dict
-        monthly_income: float  # S/. 3200
-        annual_cost: float  # S/. 1200
-        admission_rate: float  # 18.0 (porcentaje)
-        duration_years: int  # 5
+    """Un item en el ranking Top-5."""
+    
+    rank: int  # 1, 2, 3, 4, 5
+    career_id: str
+    career_name: str  # "Estadística"
+    institution: str  # "UNMSM"
+    
+    # Score de concordancia
+    concordancia_score: float  # [0,1]
+    
+    # Desglose por criterio
+    scores_by_criterion: dict  # {
+                                #   afinidad: 0.85,
+                                #   ingreso: 0.82,
+                                #   costo: 0.90,
+                                #   admision: 0.60,
+                                #   duracion: 0.75
+                                # }
+    
+    # Datos verificables del MINEDU
+    datos_verificables: dict  # {
+                               #   ingreso_promedio: 3200,  # S/. mes
+                               #   costo_mensualidad: 100,  # S/. mes
+                               #   tasa_admision: 18,  # %
+                               #   duracion_anios: 5
+                               # }
+    
+    # Explicación personalizada generada por LLM
+    explicacion: str  # "Te recomendamos Estadística en la UNMSM porque..."
+```
 
+---
 
-class ChatResponse:
-    """Respuesta de endpoint /chat."""
-    status: str  # "success" | "error"
-    conversation: dict
-        turn: int
-        bot_message: str
-        requires_follow_up: bool
-    ranking: dict
-        status: str  # "ready" | "awaiting_info"
-        top_3: list[RankingItem] | None
-    rag_available_for: list[str]  # Carreras con RAG disponible
-    ranking_id: str | None
-    error_message: str | None
+### `SessionContext` (en memoria, Fargate, TTL=1800s)
 
+```python
+class SessionContext:
+    """Contexto conversacional de sesión (en memoria en Fargate)."""
+    
+    session_id: str  # UUID
+    profile: StudentProfile  # Perfil parcial/completo interpretado
+    conversation_history: list[dict]  # [
+                                       #   {role: 'user', content: str, timestamp: datetime},
+                                       #   {role: 'bot', content: str, timestamp: datetime},
+                                       #   ...
+                                       # ]
+    
+    turn_count: int  # Contador de repreguntas (máx 4)
+    dialogue_state: str  # 'gathering_info' | 'ready_for_recommendation'
+    
+    created_at: float  # Timestamp creación (para TTL)
+    ttl_seconds: int  # 1800 (30 minutos)
+    
+    # Histórico de rankings generados en esta sesión
+    ranking_history: list[dict]  # [{ranking_id, top_5, timestamp}, ...]
+```
 
+---
+
+### `FeedbackRecord` (persistido en Aurora PostgreSQL)
+
+```python
 class FeedbackRecord:
-    """Registro persistido en FeedbackStorage."""
-    session_id: str
-    ranking_id: str  # Identificador único del ranking
-    timestamp_query: datetime
+    """Registro persistido de una consulta + ranking + validación."""
     
-    user_input: dict
-        raw_query: str
-        region: str | None
-        budget_max: float | None
-        institution_type_pref: str | None
+    # Identificadores
+    session_id: str  # UUID de sesión
+    ranking_id: str  # UUID único del ranking
     
-    profile_interpreted: UserProfile
+    # Entrada original del usuario
+    user_input: str  # Consulta en español
+    user_input_region: str | None  # Filtro región si especificó
+    user_input_budget_max: float | None  # Presupuesto máximo
+    user_input_institution_type: str | None  # Tipo institución filtro
     
-    weights_generated: dict
-        affinity: float
-        salary: float
-        cost: float
-        admission: float
+    # Perfil interpretado (snapshot)
+    profile_interpreted: dict  # StudentProfile serializado a JSON
     
-    ranking_generated: list[RankingItem]
+    # Pesos dinámicos generados
+    weights_generated: dict  # {
+                              #   w_afinidad: 0.3,
+                              #   w_ingreso: 0.25,
+                              #   w_costo: 0.2,
+                              #   w_admision: 0.15,
+                              #   w_duracion: 0.1
+                              # }
     
-    user_validation: dict | None
-        validation_score: int  # 1–5
-        selected_career: str | None
-        timestamp_validation: datetime
-        notes: str | None
+    # Ranking generado (Top-5)
+    ranking_generated: list[dict]  # [RankingItem serializado, ...] x 5
     
-    reproducibility_metadata: dict
-        dataset_snapshot_id: str  # Timestamp de snapshot usado
-        config_snapshot_id: str
-        prompt_version: str  # "v1", "v2", etc.
-        llm_model_used: str
-        timestamp: datetime
+    # Validación del usuario (Likert 1–5) — puede ser None si no validó aún
+    validation_score: int | None  # [1, 5]
+    selected_career: str | None  # Carrera que eligió
+    notes: str | None  # Comentarios libres
+    
+    # Reproducibilidad (para auditoría y debugging)
+    reproducibility_metadata: dict  # {
+                                     #   snapshot_id: "features_20260715_143022",
+                                     #   config_id: "config_20260715_143022",
+                                     #   prompt_version: "v1",
+                                     #   llm_model_used: "anthropic.claude-3-5-sonnet",
+                                     #   bedrock_region: "us-east-1"
+                                     # }
+    
+    # Timestamps
+    created_at: datetime  # ISO 8601 UTC (guardar ranking)
+    updated_at: datetime  # ISO 8601 UTC (actualizar con validación)
+```
 
+---
 
+### `ChatResponse` (respuesta de `/chat`)
+
+```python
+class ChatResponse:
+    """Respuesta de endpoint POST /chat."""
+    
+    status: str  # "success" | "error"
+    
+    conversation: dict  # {
+                         #   turn: 1,
+                         #   bot_message: "¿Hay región donde prefieras...?",
+                         #   requires_follow_up: true
+                         # }
+    
+    ranking: dict | None  # {
+                           #   status: "ready" | "awaiting_info",
+                           #   top_5: [RankingItem, ...] | None
+                           # }
+    
+    rag_available_for: list[str]  # ["Estadística", "Ingeniería Civil"] — carreras con RAG
+    
+    ranking_id: str | None  # UUID si ranking listo, None si sigue preguntando
+    
+    error_message: str | None  # "Token inválido" o None si éxito
+```
+
+---
+
+### `RagResponse` (respuesta de `/rag`)
+
+```python
 class RagResponse:
-    """Respuesta de query RAG."""
-    answer: str
-    sources: list[str]  # Documentos citados
+    """Respuesta de endpoint POST /rag."""
+    
+    answer: str  # Respuesta generada por LLM + contexto RAG
+    sources: list[str]  # Documentos citados (ej ["Plan Curricular Oficial UNMSM"])
     confidence: float  # [0, 1]
     status: str  # "success" | "no_documents" | "error"
 ```
 
-**Restricciones:**
+---
 
-- `UserProfile.interests`: array no vacío, 1–5 elementos.
-- Todos los pesos (`salary_priority`, etc.): números en [0, 1].
-- `FeedbackRecord.validation_score`: entero en [1, 5].
-- `RankingItem.concordancia_score`: [0, 1].
-- Timestamps: ISO 8601 UTC.
+### `FeedbackResponse` (respuesta de `/feedback`)
+
+```python
+class FeedbackResponse:
+    """Respuesta de endpoint POST /feedback."""
+    
+    status: str  # "success" | "error"
+    message: str  # "Feedback guardado" o descripción de error
+```
 
 ---
 
-## Algoritmos Clave
+## Algoritmos Detallados
 
-### Algoritmo: Cálculo de Confianza (confidence_score)
+### Algoritmo 1: Cálculo de RIASEC Code
 
 **Pseudocódigo:**
 
 ```
-FUNCTION calculate_confidence(user_profile: UserProfile) -> float
-    campos_requeridos_minimo = 4
-    campos_requeridos = [
-        "interests",
-        "salary_priority",
-        "cost_sensitivity",
-        "admission_tolerance"
-    ]
+FUNCTION calculate_riasec_code(
+    riasec_scores: dict[str, int]  # {"R": 8, "I": 9, "A": 7, "S": 6, "E": 5, "C": 4}
+) -> str
+
+    // Paso 1: Crear pares (letra, score)
+    pairs = []
+    FOR cada (letra, score) in riasec_scores:
+        pairs.append((letra, score))
     
-    campos_llenos = 0
-    FOR cada campo in campos_requeridos:
-        IF user_profile[campo] != null AND 
-           (campo != "interests" OR len(user_profile[campo]) > 0):
-            campos_llenos += 1
+    // Paso 2: Ordenar descendente por score, ascendente por letra (desempate)
+    pairs.sort(
+        key = lambda x: (-x[1], x[0])  // DESC score, ASC letter
+    )
     
-    confidence = campos_llenos / campos_requeridos_minimo
-    RETURN min(confidence, 1.0)  // Clamp a [0, 1]
+    // Paso 3: Tomar 3 primeras letras
+    code = pairs[0][0] + pairs[1][0] + pairs[2][0]
+    
+    RETURN code
 
 END FUNCTION
 ```
 
-**Ejemplos:**
-
-| Campos llenos | Confianza |
-|---|---|
-| 4/4 | 1.0 |
-| 3/4 | 0.75 |
-| 2/4 | 0.5 |
-| 1/4 | 0.25 |
-| 0/4 | 0.0 |
+**Ejemplo:**
+```
+Input: {R: 8, I: 9, A: 7, S: 6, E: 5, C: 4}
+Sorted pairs: [(I, 9), (R, 8), (A, 7), (S, 6), (E, 5), (C, 4)]
+Output: "IRA"
+```
 
 ---
 
-### Algoritmo: Imputación Jerárquica
+### Algoritmo 2: Cálculo de Afinidad RIASEC
 
 **Pseudocódigo:**
 
 ```
-FUNCTION impute_hierarchical(
-    variable: str,  // "duration_years", "monthly_income", etc.
-    df: DataFrame,
-    career_family_col: str,
-    institution_type_col: str,
-    config: dict
-) -> Series
+FUNCTION calculate_affinity(
+    student_code: str,  // "RIA" (perfil estudiante)
+    career_profile: str  // "RIA" (perfil carrera)
+) -> float
 
-    result = df[variable].copy()
+    score_crudo = 0
     
-    // Paso 1: Identificar valores inválidos
-    invalid_mask = identify_invalid_values(df, variable)
-    
-    // Paso 2: Nivel 1 - Mediana por (career_family, institution_type)
-    grouped_1 = df.groupby([career_family_col, institution_type_col])[variable].median()
-    
-    FOR cada registro i donde invalid_mask[i]:
-        cf = df[career_family_col][i]
-        it = df[institution_type_col][i]
+    // Para cada letra del perfil de carrera
+    FOR i, career_letter in enumerate(career_profile):
         
-        IF (cf, it) in grouped_1:
-            result[i] = grouped_1[(cf, it)]
-            CONTINUE
+        // Buscar posición en código estudiante
+        student_pos = student_code.find(career_letter)
         
-        // Nivel 2 - Mediana por career_family
-        grouped_2 = df.groupby([career_family_col])[variable].median()
-        
-        IF cf in grouped_2:
-            result[i] = grouped_2[cf]
-            CONTINUE
-        
-        // Nivel 3 - Fallback configurado
-        fallback_key = variable + "_fallback"
-        IF fallback_key in config:
-            result[i] = config[fallback_key]
+        IF student_pos == -1:
+            // Letra no está en perfil estudiante
+            points = 0
+        ELIF student_pos == 0:
+            // Posición 1 (índice 0) en estudiante
+            points = 3
+        ELIF student_pos == 1:
+            // Posición 2 (índice 1)
+            points = 2
+        ELIF student_pos == 2:
+            // Posición 3 (índice 2)
+            points = 1
         ELSE:
-            result[i] = null  // No debería ocurrir si config está completo
+            // No debería ocurrir (code tiene 3 letras)
+            points = 0
+        
+        score_crudo += points
     
-    RETURN result
+    // Normalizar a [0,1]
+    // Máximo posible: 3+2+1 = 6 por cada letra → 18 para 3 letras
+    afinidad_norm = score_crudo / 18.0
+    
+    RETURN clamp(afinidad_norm, 0.0, 1.0)
 
 END FUNCTION
 ```
 
+**Ejemplo:**
+```
+student_code = "RIA"
+career_profile = "RIA"  → R:pos0(+3), I:pos1(+2), A:pos2(+1) = 6 → 6/18 = 0.33
+career_profile = "AIR"  → A:pos2(+1), I:pos1(+2), R:pos0(+3) = 6 → 6/18 = 0.33
+career_profile = "SIA"  → S:not_found(0), I:pos1(+2), A:pos2(+1) = 3 → 3/18 = 0.17
+```
+
 ---
 
-### Algoritmo: Normalización Min-Max con Transformaciones
+### Algoritmo 3: Cálculo de Confidence Score
+
+**Pseudocódigo:**
+
+```
+FUNCTION calculate_confidence(profile: StudentProfile) -> float
+
+    // Contar campos completados
+    riasec_completos = 1 si (profile.riasec_scores contiene 6 keys y todos != None)
+                       0 si no
+    
+    pesos_completos = 0
+    FOR cada peso in [w_afinidad, w_ingreso, w_costo, w_admision, w_duracion]:
+        IF profile[peso] != None:
+            pesos_completos += 1
+    
+    // Máximo posible: 6 (RIASEC) + 5 (pesos) = 11
+    confidence = (riasec_completos * 6 + pesos_completos) / 11.0
+    
+    RETURN clamp(confidence, 0.0, 1.0)
+
+END FUNCTION
+```
+
+**Tabla de ejemplos:**
+| RIASEC | Pesos | Confidence |
+|---|---|---|
+| 6/6 | 5/5 | (6 + 5) / 11 = 1.0 |
+| 6/6 | 3/5 | (6 + 3) / 11 ≈ 0.82 |
+| 6/6 | 0/5 | (6 + 0) / 11 ≈ 0.55 |
+| 0/6 | 3/5 | (0 + 3) / 11 ≈ 0.27 |
+| 0/6 | 0/5 | (0 + 0) / 11 = 0.0 |
+
+---
+
+### Algoritmo 4: Cálculo de Pesos desde Orden de Prioridad
+
+**Pseudocódigo:**
+
+```
+FUNCTION calculate_weights_from_ranking(
+    order: list[str]  // ["afinidad", "ingreso", "costo", "admision", "duracion"]
+) -> dict[str, float]
+
+    // Asignar puntaje 5-4-3-2-1 según posición
+    scores = {
+        order[0]: 5,  // 1er elemento: 5 puntos
+        order[1]: 4,
+        order[2]: 3,
+        order[3]: 2,
+        order[4]: 1   // Último: 1 punto
+    }
+    
+    total = 5 + 4 + 3 + 2 + 1 = 15
+    
+    // Normalizar a [0,1]
+    weights = {
+        "w_afinidad": scores.get("afinidad", 0) / 15.0,
+        "w_ingreso": scores.get("ingreso", 0) / 15.0,
+        "w_costo": scores.get("costo", 0) / 15.0,
+        "w_admision": scores.get("admision", 0) / 15.0,
+        "w_duracion": scores.get("duracion", 0) / 15.0
+    }
+    
+    RETURN weights
+
+END FUNCTION
+```
+
+**Ejemplo:**
+```
+order = ["afinidad", "ingreso", "costo", "admision", "duracion"]
+→ w_afinidad = 5/15 = 0.333
+→ w_ingreso = 4/15 = 0.267
+→ w_costo = 3/15 = 0.200
+→ w_admision = 2/15 = 0.133
+→ w_duracion = 1/15 = 0.067
+suma = 1.0 ✓
+```
+
+---
+
+### Algoritmo 5: Normalización MinMax con Transformaciones
 
 **Pseudocódigo:**
 
@@ -2251,7 +2505,7 @@ FUNCTION normalize_variable(
     max_val = series.max()
     
     IF min_val == max_val:
-        normalized = Series([1.0] * len(series))  // Todos iguales → score 1.0
+        normalized = Series([1.0] * len(series))  // Todos iguales → 1.0
     ELSE:
         normalized = (series - min_val) / (max_val - min_val)
     
@@ -2263,147 +2517,221 @@ FUNCTION normalize_variable(
 
 END FUNCTION
 
-// Aplicación específica:
-income_score = normalize_variable(income_imputed, log_transform=true, invert=false)
-cost_score = normalize_variable(cost_imputed, log_transform=true, invert=true)
-duration_score = normalize_variable(duration_imputed, log_transform=false, invert=true)
-admission_score = normalize_variable(admission_imputed, log_transform=false, invert=false)
+// Aplicación específica para features.csv:
+ingreso_norm = normalize_variable(ingreso_promedio, log=True, invert=False)
+costo_norm = normalize_variable(costo_mensualidad, log=True, invert=False)
+    // Inversión ocurre en fórmula final, no aquí
+selectividad_norm = normalize_variable(tasa_admision, log=False, invert=True)
+    // Mayor tasa admisión → menor selectividad → menor score deseado
+duracion_norm = normalize_variable(duracion_anios, log=False, invert=False)
+    // Inversión ocurre en fórmula final
 ```
 
 ---
 
-### Algoritmo: Scoring Multi-Criterio (Suma Ponderada)
+### Algoritmo 6: Cálculo de Score de Concordancia (5 Criterios)
 
 **Pseudocódigo:**
 
 ```
-FUNCTION calculate_concordancia(
-    affinity: float [0,1],
-    income_score: float [0,1],
-    cost_score: float [0,1],
-    admission_score: float [0,1],
-    weights: dict {affinity, salary, cost, admission}
+FUNCTION calculate_score(
+    weights: dict,  // {w_afinidad, w_ingreso, w_costo, w_admision, w_duracion}
+    afinidad_norm: float [0,1],
+    ingreso_norm: float [0,1],
+    costo_norm: float [0,1],
+    selectividad_norm: float [0,1],
+    duracion_norm: float [0,1]
 ) -> float
 
-    // Validar pesos
-    sum_weights = weights["affinity"] + weights["salary"] + 
-                  weights["cost"] + weights["admission"]
-    
+    // Validar que pesos sumen 1.0 ± 0.01
+    sum_weights = sum(weights.values())
     IF abs(sum_weights - 1.0) > 0.01:
-        // Normalizar pesos automáticamente
-        weights["affinity"] /= sum_weights
-        weights["salary"] /= sum_weights
-        weights["cost"] /= sum_weights
-        weights["admission"] /= sum_weights
-        LOG_WARNING("Pesos normalizados: suma no era 1.0")
+        // Normalizar automáticamente
+        FOR key in weights:
+            weights[key] /= sum_weights
+        LOG_WARNING("Pesos renormalizados: suma no era 1.0")
     
-    // Calcular score
-    concordancia = (
-        weights["affinity"] * affinity +
-        weights["salary"] * income_score +
-        weights["cost"] * cost_score +
-        weights["admission"] * admission_score
+    // Aplicar inversiones de criterios
+    ingreso_score = ingreso_norm  // Mayor ingreso = mejor
+    costo_score = 1 - costo_norm  // Menor costo = mejor
+    admision_score = 1 - selectividad_norm  // Más fácil admisión = mejor
+    duracion_score = 1 - duracion_norm  // Menor duración = mejor
+    
+    // Fórmula: suma ponderada
+    score = (
+        weights["w_afinidad"] * afinidad_norm +
+        weights["w_ingreso"] * ingreso_score +
+        weights["w_costo"] * costo_score +
+        weights["w_admision"] * admision_score +
+        weights["w_duracion"] * duracion_score
     )
     
-    RETURN clamp(concordancia, 0.0, 1.0)
+    RETURN clamp(score, 0.0, 1.0)
 
 END FUNCTION
 ```
 
 ---
 
-### Algoritmo: Ranking Determinístico
+### Algoritmo 7: Ranking Determinístico (Top-5)
 
 **Pseudocódigo:**
 
 ```
-FUNCTION rank_careers(
-    df: DataFrame,  // features.csv con todos los scores
-    affinity_scores: list[float],
-    weights: dict,
-    filters: dict  // {geographic, institution_type, budget_max}
+FUNCTION rank_and_filter(
+    profile: StudentProfile,
+    features_df: DataFrame
 ) -> list[RankingItem]
 
-    // Paso 1: Aplicar filtros
-    filtered_df = df.copy()
+    // Paso 1: Calcular código RIASEC estudiante
+    riasec_code = calculate_riasec_code(profile.riasec_scores)
     
-    IF filters["geographic"]:
-        filtered_df = filtered_df[filtered_df["location"] == filters["geographic"]]
+    // Paso 2: Aplicar filtros duros (Bloque C)
+    filtered_df = features_df.copy()
     
-    IF filters["institution_type"]:
-        filtered_df = filtered_df[filtered_df["institution_type"] == filters["institution_type"]]
+    IF profile.region != None:  // Si no dijo "me da igual"
+        filtered_df = filtered_df[filtered_df["region"] == profile.region]
     
-    IF filters["budget_max"]:
-        filtered_df = filtered_df[filtered_df["annual_cost"] <= filters["budget_max"]]
+    IF profile.tipo_institucion != None:
+        filtered_df = filtered_df[filtered_df["tipo_institucion"] == profile.tipo_institucion]
     
-    // Paso 2: Calcular concordancia para cada fila
+    IF profile.presupuesto_max != None:
+        filtered_df = filtered_df[filtered_df["costo_mensualidad"] <= profile.presupuesto_max]
+    
+    IF profile.modalidad != None:
+        filtered_df = filtered_df[filtered_df["modalidad"] == profile.modalidad]
+    
+    // Paso 3: Calcular score para cada fila
     results = []
     
     FOR idx, row in filtered_df.iterrows():
-        concordancia = calculate_concordancia(
-            affinity = affinity_scores[idx],
-            income_score = row["income_score"],
-            cost_score = row["cost_score"],
-            admission_score = row["admission_score"],
-            weights = weights
+        
+        // Calcular afinidad RIASEC
+        afinidad = calculate_affinity(riasec_code, row["riasec_profile"])
+        
+        // Si riasec_profile falta, afinidad = 0.5 (fallback)
+        IF row["riasec_profile"] == None or row["riasec_profile"] == "":
+            afinidad = 0.5
+            LOG_WARNING(f"RIASEC faltante para {row['career_id']}")
+        
+        // Calcular score final
+        score = calculate_score(
+            weights={
+                "w_afinidad": profile.w_afinidad,
+                "w_ingreso": profile.w_ingreso,
+                "w_costo": profile.w_costo,
+                "w_admision": profile.w_admision,
+                "w_duracion": profile.w_duracion
+            },
+            afinidad_norm=afinidad,
+            ingreso_norm=row["ingreso_norm"],
+            costo_norm=row["costo_norm"],
+            selectividad_norm=row["selectividad_norm"],
+            duracion_norm=row["duracion_norm"]
         )
         
         results.append({
-            "index": idx,
-            "career": row["career"],
+            "career_id": row["career_id"],
+            "career_name": row["career_name"],
             "institution": row["institution"],
-            "concordancia_score": concordancia,
+            "concordancia_score": score,
             "scores_by_criterion": {
-                "affinity": affinity_scores[idx],
-                "salary": row["income_score"],
-                "cost": row["cost_score"],
-                "admission": row["admission_score"]
+                "afinidad": afinidad,
+                "ingreso": row["ingreso_norm"],
+                "costo": row["costo_norm"],
+                "admision": 1 - row["selectividad_norm"],
+                "duracion": 1 - row["duracion_norm"]
             },
             "verifiable_data": {
-                "monthly_income": row["monthly_income"],
-                "annual_cost": row["annual_cost"],
-                "admission_rate": row["admission_rate"],
-                "duration_years": row["duration_years"]
+                "ingreso_promedio": row["ingreso_promedio"],
+                "costo_mensualidad": row["costo_mensualidad"],
+                "tasa_admision": row["tasa_admision"],
+                "duracion_anios": row["duracion_anios"]
             }
         })
     
-    // Paso 3: Ordenar descendente por concordancia
+    // Paso 4: Ordenar descendente por score
+    // Desempate: alfabético por institution (determinismo)
     results.sort(
         key = lambda x: (-x["concordancia_score"], x["institution"])
-        // Desempate: alfabético por institution
     )
     
-    // Paso 4: Asignar ranks
-    FOR i, item in enumerate(results):
+    // Paso 5: Asignar ranks y retornar Top-5
+    top_5 = []
+    FOR i, item in enumerate(results[:5]):
         item["rank"] = i + 1
+        top_5.append(item)
     
-    RETURN results
+    RETURN top_5
 
 END FUNCTION
 ```
 
-**Propiedad Determinística:**
-- Mismo input (affinity_scores, features, weights, filters) → mismo output ranking en 100% de ejecuciones.
+**Determinismo:**
+- Mismo input (profile, features_df) → mismo output ranking en 100% ejecuciones.
 - Desempate alfabético por `institution` garantiza orden único.
 
 ---
 
-## Diseño de la Interfaz Principal
+### Algoritmo 8: Imputación Jerárquica (Data Pipeline)
 
-### Interfaz REST API
+**Pseudocódigo:**
 
-**Base URL:** `http://localhost:8000` (configurable)
+```
+FUNCTION impute_hierarchical(
+    variable: str,  // "duration_years", "monthly_income", "annual_cost", "admission_rate"
+    df: DataFrame,
+    config: dict
+) -> Series
 
-#### Endpoint: POST /chat
+    result = df[variable].copy()
+    
+    // Identificar valores inválidos
+    invalid_mask = (
+        (df[variable] <= 0) |
+        (df[variable].isna()) |
+        ((variable == "duration_years") AND (df[variable] > 10)) |
+        ((variable == "admission_rate") AND (df[variable] > 90))
+    )
+    
+    // Nivel 1: Mediana por career_family
+    level_1_fallback = df.groupby("career_family")[variable].median()
+    
+    FOR idx WHERE invalid_mask[idx]:
+        cf = df["career_family"][idx]
+        
+        IF cf in level_1_fallback AND level_1_fallback[cf] != None:
+            result[idx] = level_1_fallback[cf]
+            CONTINUE
+        
+        // Nivel 2: Fallback desde config
+        fallback_key = variable + "_fallback"
+        IF fallback_key in config:
+            result[idx] = config[fallback_key]
+        ELSE:
+            // No debería ocurrir si config está completo
+            LOG_ERROR(f"Fallback no definido para {variable}")
+            result[idx] = None
+    
+    RETURN result
+
+END FUNCTION
+```
+
+---
+
+## Diseño de API REST
+
+### Endpoint: POST /chat
 
 **Request:**
 ```json
 {
-    "message": "string (consulta del usuario)",
+    "message": "Me interesan las matemáticas y el análisis de datos",
     "metadata": {
-        "region": "string | null",
-        "budget_max": "number | null",
-        "institution_type": "string | null"
+        "region": null,
+        "budget_max": null,
+        "institution_type": null
     }
 }
 ```
@@ -2417,802 +2745,1032 @@ Content-Type: application/json
 **Response (200 OK):**
 ```json
 {
-    "status": "success" | "error",
+    "status": "success",
     "conversation": {
         "turn": 1,
-        "bot_message": "string",
-        "requires_follow_up": true | false
+        "bot_message": "¡Excelente! Veo que te interesan áreas cuantitativas. Para darte mejores recomendaciones, ¿hay alguna región del Perú donde prefieras estudiar?",
+        "requires_follow_up": true
     },
     "ranking": {
-        "status": "ready" | "awaiting_info",
-        "top_3": [
-            {
-                "rank": 1,
-                "career": "Estadística",
-                "institution": "UNMSM",
-                "concordancia_score": 0.847,
-                "monthly_income": 3200,
-                "annual_cost": 1200,
-                "admission_rate": 18,
-                "explanation": "Te recomendamos..."
-            },
-            ...
-        ]
+        "status": "awaiting_info",
+        "top_5": null
     },
-    "rag_available_for": ["Estadística", "Ingeniería Civil"],
-    "ranking_id": "s_1234567890_20260715_143022_abc123def456",
+    "rag_available_for": [],
+    "ranking_id": null,
     "error_message": null
 }
 ```
 
-**HTTP Status Codes:**
-- `200 OK`: Éxito (incluso si `status="error"` en JSON).
-- `401 Unauthorized`: Token inválido o expirado.
-- `500 Internal Server Error`: Error servidor no capturado.
+**Response con Ranking (después de confianza >= 0.70):**
+```json
+{
+    "status": "success",
+    "conversation": {
+        "turn": 4,
+        "bot_message": "Perfecto, tengo una visión clara de lo que buscas. Aquí están mis 5 mejores recomendaciones:",
+        "requires_follow_up": false
+    },
+    "ranking": {
+        "status": "ready",
+        "top_5": [
+            {
+                "rank": 1,
+                "career_name": "Estadística",
+                "institution": "UNMSM",
+                "concordancia_score": 0.847,
+                "scores_by_criterion": {
+                    "afinidad": 0.85,
+                    "ingreso": 0.82,
+                    "costo": 0.90,
+                    "admision": 0.60,
+                    "duracion": 0.75
+                },
+                "datos_verificables": {
+                    "ingreso_promedio": 3200,
+                    "costo_mensualidad": 100,
+                    "tasa_admision": 18,
+                    "duracion_anios": 5
+                },
+                "explicacion": "Te recomendamos Estadística en la UNMSM porque tu afinidad con el análisis de datos es muy alta (85/100). Esta carrera ofrece uno de los mejores ingresos en el mercado (S/. 3,200/mes según datos del MINEDU) con un costo relativamente accesible. Aunque es selectiva (18% de admisión), es factible con tu fortaleza en matemáticas."
+            },
+            {
+                "rank": 2,
+                "career_name": "Ingeniería Civil",
+                "institution": "UNI",
+                "concordancia_score": 0.812,
+                "scores_by_criterion": {
+                    "afinidad": 0.78,
+                    "ingreso": 0.88,
+                    "costo": 0.85,
+                    "admision": 0.65,
+                    "duracion": 0.70
+                },
+                "datos_verificables": {
+                    "ingreso_promedio": 3500,
+                    "costo_mensualidad": 120,
+                    "tasa_admision": 22,
+                    "duracion_anios": 5
+                },
+                "explicacion": "Ingeniería Civil en la UNI es otra excelente opción. Combina razonamiento analítico con aplicaciones prácticas. Los ingresos son superiores (S/. 3,500/mes) y la demanda en el mercado es consistente. Un poco más selectiva que Estadística, pero muy accesible para estudiantes con tu perfil."
+            },
+            {
+                "rank": 3,
+                "career_name": "Ciencia de Datos",
+                "institution": "Pontificia Universidad Católica",
+                "concordancia_score": 0.795,
+                "scores_by_criterion": {
+                    "afinidad": 0.92,
+                    "ingreso": 0.85,
+                    "costo": 0.60,
+                    "admision": 0.70,
+                    "duracion": 0.68
+                },
+                "datos_verificables": {
+                    "ingreso_promedio": 3100,
+                    "costo_mensualidad": 280,
+                    "tasa_admision": 35,
+                    "duracion_anios": 4
+                },
+                "explicacion": "Ciencia de Datos tiene la máxima afinidad con tu perfil (92/100) y es más nueva en el mercado. El programa es más corto (4 años) y menos selectivo. Sin embargo, es una institución privada con costos mayores (S/. 280/mes). Es ideal si buscas especialización rápida."
+            },
+            {
+                "rank": 4,
+                "career_name": "Matemática Aplicada",
+                "institution": "UNMSM",
+                "concordancia_score": 0.778,
+                "scores_by_criterion": {
+                    "afinidad": 0.90,
+                    "ingreso": 0.72,
+                    "costo": 0.92,
+                    "admision": 0.55,
+                    "duracion": 0.82
+                },
+                "datos_verificables": {
+                    "ingreso_promedio": 2800,
+                    "costo_mensualidad": 80,
+                    "tasa_admision": 15,
+                    "duracion_anios": 5
+                },
+                "explicacion": "Matemática Aplicada es la opción más accesible económicamente (S/. 80/mes) con altísima afinidad (90/100). Los ingresos son menores que otras opciones, pero ofrece flexibilidad para postgrados especializados. Recomendada si el presupuesto es una limitación importante."
+            },
+            {
+                "rank": 5,
+                "career_name": "Actuaría",
+                "institution": "Pontificia Universidad Católica",
+                "concordancia_score": 0.742,
+                "scores_by_criterion": {
+                    "afinidad": 0.80,
+                    "ingreso": 0.92,
+                    "costo": 0.55,
+                    "admision": 0.68,
+                    "duracion": 0.65
+                },
+                "datos_verificables": {
+                    "ingreso_promedio": 4100,
+                    "costo_mensualidad": 300,
+                    "tasa_admision": 40,
+                    "duracion_anios": 5
+                },
+                "explicacion": "Actuaría ofrece los ingresos más altos del ranking (S/. 4,100/mes), combinando matemáticas con aplicación en seguros y finanzas. Es menos selectiva que otras opciones, pero también es privada con costos elevados. Ideal si el potencial salarial es prioritario."
+            }
+        ]
+    },
+    "rag_available_for": ["Estadística", "Ingeniería Civil", "Ciencia de Datos"],
+    "ranking_id": "550e8400-e29b-41d4-a716-446655440000",
+    "error_message": null
+}
+```
 
 ---
 
-#### Endpoint: POST /feedback
+### Endpoint: POST /feedback
 
 **Request:**
 ```json
 {
-    "ranking_id": "string",
-    "validation_score": 1–5,
-    "selected_career": "string | null",
-    "notes": "string | null"
+    "ranking_id": "550e8400-e29b-41d4-a716-446655440000",
+    "validation_score": 5,
+    "selected_career": "Estadística",
+    "notes": "Me gustó mucho. Voy a investigar más sobre esta carrera."
 }
-```
-
-**Headers:**
-```
-Authorization: Bearer {session_token}
-Content-Type: application/json
 ```
 
 **Response (200 OK):**
 ```json
 {
-    "status": "success" | "error",
-    "message": "string"
+    "status": "success",
+    "message": "¡Gracias por tu feedback! Nos ayuda a mejorar nuestras recomendaciones."
 }
 ```
 
-**HTTP Status Codes:**
-- `200 OK`: Éxito.
-- `401 Unauthorized`: Token inválido.
-- `403 Forbidden`: ranking_id no pertenece a sesión.
-- `422 Unprocessable Entity`: validation_score fuera de rango [1, 5].
-- `500 Internal Server Error`: Error servidor.
+**Response (422 Unprocessable Entity):**
+```json
+{
+    "status": "error",
+    "message": "validation_score debe estar entre 1 y 5"
+}
+```
 
 ---
 
-#### Endpoint: POST /rag
+### Endpoint: POST /rag
 
 **Request:**
 ```json
 {
     "career": "Estadística",
-    "question": "¿Qué cursos lleva?"
+    "question": "¿Qué cursos lleva esta carrera?"
 }
-```
-
-**Headers:**
-```
-Authorization: Bearer {session_token}
-Content-Type: application/json
 ```
 
 **Response (200 OK):**
 ```json
 {
-    "answer": "Estadística comprende cursos de...",
-    "sources": ["Plan Curricular Oficial UNMSM"],
-    "confidence": 0.92,
-    "status": "success" | "no_documents" | "error"
+    "answer": "Estadística comprende cursos teóricos y aplicados divididos en bloques: \n\n1. Probabilidad y Cálculo (primer año): Cálculo I–III, Álgebra Lineal, Probabilidades. \n2. Estadística Matemática (segundo año): Inferencia Estadística, Muestreo, Teoría de Decisiones. \n3. Aplicaciones (tercero-cuarto año): Análisis Multivariante, Series de Tiempo, Modelos Lineales. \n4. Especialización (quinto año): Cursos electivos de análisis bayesiano, econometría, estadística computacional.",
+    "sources": ["Plan Curricular Oficial UNMSM 2024", "Catálogo de Cursos Requeridos"],
+    "confidence": 0.94,
+    "status": "success"
 }
 ```
 
-**HTTP Status Codes:**
-- `200 OK`: Éxito.
-- `401 Unauthorized`: Token inválido.
-- `500 Internal Server Error`: Error servidor.
-
----
-
-#### Endpoint: POST /session/create (Auxiliar)
-
-**Request:**
-```json
-{}
-```
-
-**Response (200 OK):**
+**Response (no_documents):**
 ```json
 {
-    "session_id": "550e8400-e29b-41d4-a716-446655440000",
-    "session_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+    "answer": "",
+    "sources": [],
+    "confidence": 0.0,
+    "status": "no_documents"
 }
 ```
 
 ---
 
-### CLI de Data Pipeline (Alternativa)
+## Estructura de Persistencia
 
-> **Nota:** La interfaz principal es REST API para web. CLI es opcional para ejecución de pipeline desde línea de comandos.
-
-```bash
-# Ejecutar pipeline completo
-python -m data_pipeline.ingestion
-python -m data_pipeline.data_clean
-python -m data_pipeline.feature_engineering
-
-# O en un script master
-python scripts/run_pipeline.py
-```
-
----
-
-## Estructura de Archivos de Salida
-
-### Estructura del Repositorio (Demo)
-
-```
-careermatch-peru/
-│
-├── README.md
-├── requirements.txt
-├── Dockerfile
-├── docker-compose.yml
-├── .env.example
-├── .gitignore
-│
-├── backend/
-│   ├── __init__.py
-│   ├── app.py                    # FastAPI entry point
-│   ├── auth.py                   # Auth_Service
-│   ├── session.py                # Session_Manager
-│   ├── llm_service.py            # LLM_Layer
-│   ├── scoring.py                # Scoring_Engine
-│   ├── rag.py                    # RAG_Module
-│   ├── embedding.py              # Embedding_Service
-│   ├── feedback.py               # Feedback_Storage
-│   ├── orchestration.py          # Orchestration_Layer
-│   ├── models.py                 # Pydantic schemas
-│   ├── utils.py                  # Utilidades (logging, etc.)
-│   └── config.py                 # Configuración centralizada
-│
-├── data_pipeline/
-│   ├── __init__.py
-│   ├── ingestion.py              # Descarga automatizada
-│   ├── data_clean.py             # Limpieza
-│   ├── feature_engineering.py    # Imputación + normalización
-│   ├── config.py                 # Config compartido
-│   └── utils.py                  # Utilidades pipeline
-│
-├── frontend/
-│   ├── index.html
-│   ├── styles.css
-│   ├── app.js                    # Lógica principal
-│   ├── components/
-│   │   ├── chat.js
-│   │   ├── ranking.js
-│   │   └── feedback.js
-│   └── utils/
-│       ├── api.js
-│       └── auth.js
-│
-├── data/
-│   ├── raw.xlsx                  # Última descarga (actualizable)
-│   ├── filtered.csv              # Última versión limpia
-│   ├── features.csv              # Última versión normalizada
-│   ├── feature_config.json       # Configuración de imputación
-│   ├── AFINIDAD_METHOD.md         # Documentación método elegido
-│   ├── SCORING_STRATEGY.md        # Documentación estrategia
-│   └── career_affinity_mapping.json  # (Si método B es elegido)
-│
-├── snapshots/
-│   ├── raw/
-│   │   ├── raw_20260614_143022.xlsx
-│   │   ├── raw_20260615_091545.xlsx
-│   │   └── ...
-│   ├── features/
-│   │   ├── features_20260614_143022.csv
-│   │   ├── features_20260615_091545.csv
-│   │   └── ...
-│   └── configs/
-│       ├── feature_config_20260614_143022.json
-│       ├── feature_config_20260615_091545.json
-│       └── ...
-│
-├── notebooks/
-│   ├── 00_exploratory_data_analysis.ipynb
-│   ├── 01_pipeline_validation.ipynb
-│   ├── 02_affinity_calculation.ipynb
-│   └── 03_demo_integration.ipynb
-│
-├── tests/
-│   ├── test_auth.py
-│   ├── test_session.py
-│   ├── test_llm_service.py
-│   ├── test_scoring.py
-│   ├── test_feedback.py
-│   ├── test_pipeline.py
-│   ├── conftest.py
-│   └── fixtures/
-│       ├── sample_features.csv
-│       └── sample_profiles.json
-│
-├── docs/
-│   ├── ARCHITECTURE.md            # Visión general técnica
-│   ├── API.md                      # Especificación REST
-│   ├── DEVELOPMENT.md              # Guía para desarrolladores
-│   ├── DEPLOYMENT.md               # Despliegue
-│   └── DECISIONS.md                # Decisiones de diseño
-│
-└── scripts/
-    ├── run_pipeline.py             # Script maestro del pipeline
-    └── setup_db.py                 # Inicialización de BD
-```
-
-### Estructura de Datos Persistidos
-
-**Base de Datos (SQLite demo / PostgreSQL producción):**
+### Aurora PostgreSQL — Tablas Principales
 
 ```sql
--- Tabla de feedbacks
-CREATE TABLE feedback (
-    id SERIAL PRIMARY KEY,
+-- Tabla: feedback (contiene rankings + validaciones)
+CREATE TABLE IF NOT EXISTS feedback (
+    id BIGSERIAL PRIMARY KEY,
     session_id UUID NOT NULL,
     ranking_id UUID NOT NULL UNIQUE,
-    timestamp_query TIMESTAMP NOT NULL,
     
-    user_input_raw_query TEXT NOT NULL,
-    user_input_region VARCHAR(50),
-    user_input_budget_max DECIMAL,
+    -- Entrada del usuario
+    user_input TEXT NOT NULL,
+    user_input_region VARCHAR(100),
+    user_input_budget_max DECIMAL(10,2),
     user_input_institution_type VARCHAR(20),
     
-    profile_interests TEXT NOT NULL,  -- JSON serializado
-    profile_salary_priority DECIMAL,
-    profile_cost_sensitivity DECIMAL,
-    profile_admission_tolerance DECIMAL,
-    profile_confidence DECIMAL,
+    -- Perfil interpretado (JSON)
+    profile_riasec_scores JSONB,  -- {"R": 8, "I": 9, ...}
+    profile_riasec_code VARCHAR(3),
+    profile_w_afinidad DECIMAL(3,2),
+    profile_w_ingreso DECIMAL(3,2),
+    profile_w_costo DECIMAL(3,2),
+    profile_w_admision DECIMAL(3,2),
+    profile_w_duracion DECIMAL(3,2),
+    profile_confidence DECIMAL(3,2),
     
-    weights_affinity DECIMAL,
-    weights_salary DECIMAL,
-    weights_cost DECIMAL,
-    weights_admission DECIMAL,
+    -- Ranking generado (JSON completo)
+    ranking_generated JSONB,  -- Array de RankingItem [...]
     
-    ranking_generated TEXT NOT NULL,  -- JSON serializado (Top-3)
-    
-    validation_score INT,
+    -- Validación del usuario
+    validation_score SMALLINT,
     validation_selected_career VARCHAR(255),
-    validation_timestamp TIMESTAMP,
     validation_notes TEXT,
     
-    reproducibility_snapshot_id VARCHAR(255),
-    reproducibility_prompt_version VARCHAR(10),
-    reproducibility_llm_model VARCHAR(100),
+    -- Reproducibilidad
+    snapshot_id VARCHAR(50),  -- features_20260715_143022
+    config_id VARCHAR(50),    -- config_20260715_143022
+    prompt_version VARCHAR(10),
+    llm_model_used VARCHAR(100),
+    bedrock_region VARCHAR(30),
     
-    FOREIGN KEY (session_id) REFERENCES sessions(id),
-    INDEX idx_session_id (session_id),
-    INDEX idx_career (ranking_generated)
+    -- Timestamps
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    
+    -- Índices
+    INDEX idx_session ON feedback(session_id),
+    INDEX idx_ranking ON feedback(ranking_id),
+    INDEX idx_created ON feedback(created_at)
 );
 
--- Tabla de sesiones
-CREATE TABLE sessions (
-    id UUID PRIMARY KEY,
-    session_token_hash VARCHAR(255) NOT NULL UNIQUE,
-    created_at TIMESTAMP NOT NULL,
-    last_activity TIMESTAMP NOT NULL,
-    expires_at TIMESTAMP NOT NULL,
-    user_agent VARCHAR(500),
-    ip_address VARCHAR(50)
+-- Tabla: career_chunks (para RAG, pgvector)
+CREATE TABLE IF NOT EXISTS career_chunks (
+    id BIGSERIAL PRIMARY KEY,
+    career_id TEXT NOT NULL,
+    content TEXT NOT NULL,
+    embedding VECTOR(1024),
+    metadata JSONB,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    
+    INDEX idx_career ON career_chunks(career_id),
+    INDEX idx_embedding ON career_chunks USING ivfflat (embedding vector_cosine_ops)
 );
+```
+
+### DynamoDB — Tabla universities
+
+```
+Tabla: universities
+
+Atributos:
+  PK: institution_id (S)  — "unmsm_001"
+  
+  Atributos principales:
+    name (S)                   — "Universidad Nacional Mayor de San Marcos"
+    region (S)                 — "Lima"
+    tipo_institucion (S)       — "publica" | "privada"
+    latitude (N)               — -12.0450
+    longitude (N)              — -77.0822
+    careers_ids (SS)           — {"estadistica_001", "ingenieria_civil_001", ...}
+    website (S)                — "https://www.unmsm.edu.pe"
+    contact_email (S)          — "admisiones@unmsm.edu.pe"
+    
+GSI: region-index
+  PK: region (S)
+  SK: institution_id (S)
+  
+Permite queries tipo:
+  SELECT * FROM universities WHERE region = "Lima"
+```
+
+### SQLite (Demo Local)
+
+Para desarrollo local sin AWS, usar SQLite:
+
+```python
+# backend/config.py
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "sqlite:///./feedback.db"  # Default para demo
+)
+```
+
+```sql
+-- Base de datos de demo (SQLite)
+CREATE TABLE feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    ranking_id TEXT NOT NULL UNIQUE,
+    
+    user_input TEXT NOT NULL,
+    user_input_region TEXT,
+    user_input_budget_max REAL,
+    user_input_institution_type TEXT,
+    
+    profile_riasec_scores TEXT,  -- JSON serializado
+    profile_w_afinidad REAL,
+    profile_w_ingreso REAL,
+    profile_w_costo REAL,
+    profile_w_admision REAL,
+    profile_w_duracion REAL,
+    profile_confidence REAL,
+    
+    ranking_generated TEXT,  -- JSON serializado
+    
+    validation_score INTEGER,
+    validation_selected_career TEXT,
+    validation_notes TEXT,
+    
+    snapshot_id TEXT,
+    config_id TEXT,
+    prompt_version TEXT,
+    llm_model_used TEXT,
+    
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_feedback_session ON feedback(session_id);
+CREATE INDEX idx_feedback_ranking ON feedback(ranking_id);
 ```
 
 ---
 
-## Stack Tecnológico y Dependencias
+## Restricciones y Validaciones
 
-| Componente | Versión mínima | Propósito | Instalación |
+| Campo | Restricción |
+|---|---|
+| `riasec_scores[*]` | [1, 10] |
+| `riasec_code` | Exactamente 3 letras |
+| `w_afinidad...w_duracion` | [0, 1], suma ≈ 1.0 |
+| `concordancia_score` | [0, 1] |
+| `validation_score` | [1, 5] entero |
+| `ingreso_promedio` | > 0 |
+| `costo_mensualidad` | ≥ 0 |
+| `tasa_admision` | [0, 90] % |
+| `duracion_anios` | [3, 7] años |
+| Timestamps | ISO 8601 UTC |
+
+---
+# Stack Tecnológico y Dependencias (Actualizado — AWS)
+
+## Dependencias por Componente
+
+### Core: Python Runtime
+
+| Dependencia | Versión mínima | Propósito | Notas |
 |---|---|---|---|
-| **Python** | 3.10+ | Runtime | `python3 --version` |
-| **pip** | 23.0+ | Package manager | Incluido en Python |
-| **Pandas** | 2.0.0+ | Manipulación datos | `pip install pandas>=2.0.0` |
-| **NumPy** | 1.24.0+ | Operaciones vectorizadas | `pip install numpy>=1.24.0` |
-| **Selenium** | 4.15.0+ | Automatización navegador | `pip install selenium>=4.15.0` |
-| **OpenPyXL** | 3.10.0+ | Lectura/escritura Excel | `pip install openpyxl>=3.10.0` |
-| **FastAPI** | 0.104.0+ | Framework web API | `pip install fastapi>=0.104.0` |
-| **Uvicorn** | 0.24.0+ | ASGI server | `pip install uvicorn>=0.24.0` |
-| **Pydantic** | 2.0.0+ | Validación esquemas | `pip install pydantic>=2.0.0` |
-| **google-generativeai** | 0.3.0+ | Gemini API SDK | `pip install google-generativeai>=0.3.0` |
-| **openai** | 1.0.0+ | OpenAI API SDK (alternativa) | `pip install openai>=1.0.0` |
-| **sentence-transformers** | 2.2.0+ | Embeddings local | `pip install sentence-transformers>=2.2.0` |
-| **faiss-cpu** | 1.7.0+ | Vector DB local | `pip install faiss-cpu>=1.7.0` |
-| **python-dotenv** | 1.0.0+ | Gestión .env | `pip install python-dotenv>=1.0.0` |
-| **pytest** | 7.0.0+ | Testing framework | `pip install pytest>=7.0.0` |
-| **pytest-asyncio** | 0.21.0+ | Testing async | `pip install pytest-asyncio>=0.21.0` |
-| **requests** | 2.31.0+ | HTTP client testing | `pip install requests>=2.31.0` |
-| **SQLAlchemy** | 2.0.0+ | ORM (opcional, para DB) | `pip install sqlalchemy>=2.0.0` |
-| **psycopg2** | 2.9.0+ | Adaptador PostgreSQL | `pip install psycopg2>=2.9.0` |
-| **Docker** | 20.10.0+ | Containerización | Instalar desde docker.com |
-| **Docker Compose** | 2.0.0+ | Orquestación local | Instalado con Docker Desktop |
-| **Chrome** | 90.0.0+ | Navegador para Selenium | Sistema operativo |
-| **Node.js** | 18.0.0+ | Runtime frontend (opcional) | nodejs.org |
-| **npm** | 9.0.0+ | Package manager JS (opcional) | Incluido en Node.js |
+| **Python** | 3.10+ | Runtime | Requerido para FastAPI, AWS SDK, etc. |
+| **uv** | 0.4.0+ | Package manager | Gestión moderna de dependencias (`uv add`, `uv run`, `uv sync`) |
 
-**Instalación de dependencias Python:**
+---
+
+### Backend API (Fargate + Lambda)
+
+| Dependencia | Versión mínima | Propósito | Justificación |
+|---|---|---|---|
+| **FastAPI** | 0.104.0+ | Framework REST API (Fargate) | Async, type hints, OpenAPI automático |
+| **Uvicorn** | 0.24.0+ | ASGI server (Fargate) | HTTP server ligeropara FastAPI |
+| **Pydantic** | 2.0.0+ | Validación de modelos | Schemas de request/response |
+| **boto3** | 1.28.0+ | AWS SDK (Bedrock, Aurora, DynamoDB, Lambda) | Interacción con servicios AWS |
+| **psycopg2-binary** | 2.9.0+ | PostgreSQL adapter (Aurora) | Conexiones a Aurora PostgreSQL |
+| **pgvector** | 0.1.8+ | pgvector Python client | Queries de similarity search en Aurora |
+| **SQLAlchemy** | 2.0.0+ | ORM (opcional, Aurora) | Abstracción DB, pero boto3 puede ser suficiente |
+| **python-dotenv** | 1.0.0+ | Gestión de .env | Variables de entorno locales (dev) |
+| **PyJWT** | 2.8.0+ | JWT tokens | Autenticación sin estado Lambda ↔ Fargate |
+| **cryptography** | 41.0.0+ | Encriptación (JWT) | Soporte para PyJWT |
+
+---
+
+### Data Pipeline (Batch/Fargate Task)
+
+| Dependencia | Versión mínima | Propósito | Justificación |
+|---|---|---|---|
+| **pandas** | 2.0.0+ | Manipulación de datos | Lectura/limpieza/transformación de carreras |
+| **numpy** | 1.24.0+ | Operaciones vectorizadas | Cálculos de normalización MinMax |
+| **openpyxl** | 3.10.0+ | Lectura/escritura Excel | Procesamiento de descarga de Ponte en Carrera |
+| **selenium** | 4.15.0+ | Automatización de navegador | Descarga automatizada de Ponte en Carrera (MINEDU) |
+| **boto3** | 1.28.0+ | AWS SDK | Acceso a S3 (snapshots), Bedrock (tagging RIASEC) |
+
+---
+
+### Testing
+
+| Dependencia | Versión mínima | Propósito | Instalación |
+|---|---|---|---|---|
+| **pytest** | 7.0.0+ | Test runner | `uv add --dev "pytest>=7.0.0"` |
+| **pytest-asyncio** | 0.21.0+ | Tests async (para FastAPI) | `uv add --dev "pytest-asyncio>=0.21.0"` |
+| **pytest-cov** | 4.1.0+ | Cobertura de tests | `uv add --dev "pytest-cov>=4.1.0"` |
+| **requests** | 2.31.0+ | HTTP client (tests) | `uv add --dev "requests>=2.31.0"` |
+| **moto** | 4.2.0+ | Mock AWS services | `uv add --dev "moto>=4.2.0"` |
+
+---
+
+### Frontend (Navegador)
+
+| Dependencia | Versión mínima | Propósito | Notas |
+|---|---|---|---|
+| **JavaScript (Vanilla)** | ES6+ | Lógica frontend | Sin framework (reducir dependencias) |
+| **HTML5** | — | Markup | Respetado en todo navegador moderno |
+| **CSS3** | — | Estilos responsive | Flexbox, Grid para responsividad |
+
+---
+
+### Infraestructura (AWS + Local)
+
+| Servicio/Herramienta | Versión mínima | Propósito | Notas |
+|---|---|---|---|
+| **AWS Account** | — | Acceso a servicios AWS | Requerido para Bedrock, Aurora, DynamoDB, Lambda, Fargate, etc. |
+| **AWS CLI** | 2.13.0+ | Configuración y debugging AWS | Opcional, facilita despliegue local |
+| **Docker** | 20.10.0+ | Containerización (Fargate) | Requerido para ejecutar Fargate localmente |
+| **Docker Compose** | 2.0.0+ | Orquestación local | Para desarrollo con DB local simulada |
+| **Chrome** | 90.0.0+ | Navegador (Selenium) | Requerido para descargar datos de Ponte |
+| **Node.js** | 18.0.0+ | Runtime frontend (opcional) | Solo si se desea usar build tools (webpack, etc.) |
+
+---
+
+## Gestión de Dependencias con uv
+
+El proyecto usa `uv` como gestor de dependencias. No se usa `requirements.txt`.
+
+**Inicializar proyecto:**
 
 ```bash
-pip install -r requirements.txt
+uv init
 ```
 
-**requirements.txt:**
+**Agregar dependencias:**
 
-```
-pandas>=2.0.0
-numpy>=1.24.0
-selenium>=4.15.0
-openpyxl>=3.10.0
-fastapi>=0.104.0
-uvicorn>=0.24.0
-pydantic>=2.0.0
-google-generativeai>=0.3.0
-openai>=1.0.0
-sentence-transformers>=2.2.0
-faiss-cpu>=1.7.0
-python-dotenv>=1.0.0
-pytest>=7.0.0
-pytest-asyncio>=0.21.0
-requests>=2.31.0
-sqlalchemy>=2.0.0
-psycopg2>=2.9.0
+```bash
+# Core AWS + Backend
+uv add "boto3>=1.28.0" "fastapi>=0.104.0" "uvicorn>=0.24.0" "pydantic>=2.0.0" \
+       "psycopg2-binary>=2.9.0" "pgvector>=0.1.8" "sqlalchemy>=2.0.0" \
+       "PyJWT>=2.8.0" "cryptography>=41.0.0" "python-dotenv>=1.0.0"
+
+# Data Pipeline
+uv add "pandas>=2.0.0" "numpy>=1.24.0" "openpyxl>=3.10.0" "selenium>=4.15.0"
+
+# Dev dependencies
+uv add --dev "pytest>=7.0.0" "pytest-asyncio>=0.21.0" "pytest-cov>=4.1.0" \
+            "requests>=2.31.0" "moto>=4.2.0" \
+            "ipython>=8.0.0" "notebook>=7.0.0" \
+            "black>=23.0.0" "flake8>=6.0.0" "mypy>=1.0.0"
 ```
 
-> **Decisión de diseño:** Se incluye tanto google-generativeai como openai para permitir cambio de proveedor. En producción, seleccionar uno según preferencia.
+**Sincronizar entorno:**
+
+```bash
+uv sync
+```
+
+Esto genera `uv.lock` automáticamente con versiones fijas de todas las dependencias transitivas, garantizando entornos reproducibles.
 
 ---
 
-## Manejo de Errores
+## Variables de Entorno (.env)
 
-### Estrategia General
+```bash
+# AWS Configuration
+AWS_REGION=us-east-1
+AWS_PROFILE=default  # o nombre del perfil AWS configurado
 
-El sistema implementa un enfoque de **degradación controlada**: componentes pueden fallar parcialmente sin bloquear el flujo completo.
+# Bedrock (LLM)
+LLM_PROVIDER=bedrock
+LLM_MODEL=anthropic.claude-3-5-sonnet-20241022
+BEDROCK_REGION=us-east-1
 
-- **Authent:** Si token inválido, fallar inmediatamente (HTTP 401). No hay fallback.
-- **LLM:** Si falla interpretación, reintentar máximo 3 veces. Si persiste, loguear y retornar respuesta templated.
-- **Scoring:** Si features.csv no carga, fallar visiblemente (HTTP 500).
-- **Afinidad:** Si embedding/mapeo falla, usar afinidad fallback 0.5 para todas las carreras.
-- **RAG:** Si no disponible, no bloquea ranking. Usuario recibe mensaje "información no disponible".
-- **Feedback:** Si DB no disponible, almacenar en queue local en-memoria y sincronizar cuando DB se recupere.
+# Bedrock Embeddings
+EMBEDDING_PROVIDER=bedrock
+EMBEDDING_MODEL=amazon.titan-embed-text-v2
+EMBEDDING_REGION=us-east-1
+
+# Aurora PostgreSQL
+AURORA_ENDPOINT=careermatch-db.xxxxxxxxxxxx.us-east-1.rds.amazonaws.com
+AURORA_PORT=5432
+AURORA_USER=postgres
+AURORA_PASSWORD=your_secure_password_here
+AURORA_DATABASE=careermatch
+
+# DynamoDB
+DYNAMODB_TABLE_UNIVERSITIES=universities
+DYNAMODB_REGION=us-east-1
+
+# JWT Authentication
+JWT_SECRET=your-super-secret-key-min-32-chars-xxxxxxx
+JWT_ALGORITHM=HS256
+SESSION_TIMEOUT_MINUTES=480  # 8 horas
+
+# S3 (snapshots opcional)
+S3_BUCKET_SNAPSHOTS=careermatch-snapshots
+S3_REGION=us-east-1
+
+# Logging
+LOG_LEVEL=INFO  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+
+# Development
+ENVIRONMENT=development  # production | development | staging
+DEBUG=false
+```
+
+**Archivo .env.example:**
+
+Copiar y llenar con valores reales:
+
+```bash
+cp .env.example .env
+# Editar .env con valores de AWS
+```
 
 ---
 
-### Tabla de Excepciones
+## Cambios Principales vs. Diseño Anterior
 
-| Excepción | Módulo origen | Causa | Manejo |
+### 1. LLM: De Gemini/OpenAI a Amazon Bedrock
+
+**Anterior:**
+```python
+from google.generativeai import generative_ai  # Gemini
+from openai import OpenAI  # OpenAI
+```
+
+**Ahora:**
+```python
+import boto3
+
+bedrock_client = boto3.client('bedrock-runtime', region_name='us-east-1')
+# Usar Claude-3.5-Sonnet vía Bedrock
+response = bedrock_client.invoke_model(
+    modelId='anthropic.claude-3-5-sonnet-20241022',
+    body=json.dumps({...})
+)
+```
+
+**Ventajas:**
+- Integración nativa con AWS
+- Seguridad: claves en AWS IAM
+- Costos previsibles
+- Sin SDK externo para cada proveedor
+
+---
+
+### 2. Embeddings: De sentence-transformers local a Amazon Bedrock Titan
+
+**Anterior:**
+```python
+from sentence_transformers import SentenceTransformer
+
+model = SentenceTransformer('multilingual-MiniLM-L12-v2')
+embedding = model.encode('texto')  # Local, 384 dims
+```
+
+**Ahora:**
+```python
+import boto3
+
+bedrock_client = boto3.client('bedrock-runtime', region_name='us-east-1')
+response = bedrock_client.invoke_model(
+    modelId='amazon.titan-embed-text-v2:0',
+    body=json.dumps({
+        'inputText': 'texto',
+        ...
+    })
+)
+# Retorna 1024 dims
+```
+
+**Ventajas:**
+- Embeddings en cloud (no depender de memoria local)
+- Dimensionalidad 1024 (vs 384 local)
+- Integración con pgvector en Aurora
+
+---
+
+### 3. Vector DB: De FAISS local a pgvector en Aurora
+
+**Anterior:**
+```python
+import faiss
+
+index = faiss.IndexFlatL2(1024)
+# Búsqueda local
+```
+
+**Ahora:**
+```sql
+CREATE EXTENSION pgvector;
+SELECT * FROM career_chunks
+ORDER BY embedding <=> query_embedding
+LIMIT 3;
+```
+
+**Ventajas:**
+- Persistencia automática en Aurora
+- Escalabilidad sin cargar índices en memoria
+- SQL nativo, sin librería externa
+
+---
+
+### 4. Base de Datos: De SQLite a Aurora PostgreSQL
+
+**Anterior:**
+```python
+DATABASE_URL = "sqlite:///./feedback.db"
+```
+
+**Ahora:**
+```python
+DATABASE_URL = "postgresql://user:pass@aurora-endpoint:5432/careermatch"
+```
+
+**Ventajas:**
+- Managed service (AWS RDS Aurora)
+- Backups automáticos
+- Escalabilidad
+- pgvector soporte nativo
+
+---
+
+### 5. Arquitectura: De monolito a Lambda + Fargate
+
+**Anterior:**
+- Todo en un servidor FastAPI
+
+**Ahora:**
+- **Lambda**: Stateless (`/session/create`, `/feedback`, `/universities`)
+- **Fargate**: Stateful agent (`/chat`)
+- Comunicación vía JWT sin estado compartido
+
+**Ventajas:**
+- Escalabilidad independiente
+- Costo: pagar por uso real
+- Sesiones en memoria sin overhead de Redis
+
+---
+
+## Manejo de Errores (Actualizado para AWS)
+
+### Estrategia General de Degradación Controlada
+
+```python
+try:
+    # Intentar operación
+    response = bedrock_client.invoke_model(...)
+except botocore.exceptions.ClientError as e:
+    if e.response['Error']['Code'] == 'ThrottlingException':
+        # Reintentar exponencial
+        await asyncio.sleep(2 ** attempt)
+        response = await invoke_model_retry(...)
+    elif e.response['Error']['Code'] == 'ValidationException':
+        # Fallback templado
+        logger.warning(f"Bedrock validation error: {e}")
+        response = generate_templated_response(...)
+    else:
+        # Fallar explícitamente
+        logger.error(f"Bedrock error: {e}", exc_info=True)
+        raise HTTPException(status_code=500)
+except Exception as e:
+    logger.error(f"Unexpected error: {e}", exc_info=True)
+    raise HTTPException(status_code=500)
+```
+
+---
+
+### Tabla de Excepciones AWS
+
+| Excepción | Servicio | Causa | Manejo |
 |---|---|---|---|
-| `TokenInvalidError` | Auth_Service | Token expirado o malformado | HTTP 401, loguear, requerir re-autenticación |
-| `SessionNotFoundError` | Session_Manager | session_id no existe | HTTP 403, loguear como warning |
-| `JSONParseError` | LLM_Layer | LLM retorna JSON inválido tras 3 intentos | Loguear error, usar respuesta templated |
-| `TimeoutError` | LLM_Layer / Embedding | Llamada API > timeout | Loguear, retornar respuesta de error o fallback |
-| `APIError` | LLM_Layer / Embedding | Proveedor externo no disponible | Reintentar exponencial (1s, 2s, 4s), luego fallar |
-| `FileNotFoundError` | Data_Pipeline / Scoring | Archivo requerido no existe | Fallar explícitamente, loguear stack trace |
-| `ValueError` | Data_Pipeline / Scoring | Esquema o validación inválida | Fallar explícitamente, loguear detalle |
-| `DatabaseError` | Feedback_Storage | Conexión DB fallida | Reintentar + queue local fallback |
-| `EmbeddingError` | Embedding / RAG | Generación embedding falla | Loguear, retornar respuesta vacía o fallback |
-| `RankingIdNotFoundError` | Feedback_Storage | ranking_id no existe | HTTP 400 / 422, loguear como warning |
+| `ThrottlingException` | Bedrock | Rate limit excedido | Reintentar exponencial (1s, 2s, 4s) |
+| `ValidationException` | Bedrock | Input inválido | Loguear, retornar fallback templado |
+| `AccessDeniedException` | IAM | Credenciales sin permisos | Loguear error critico, fallar HTTP 500 |
+| `EndpointConnectionError` | RDS/Aurora | BD no disponible | Queue local, reintentar sincronización |
+| `ResourceNotFoundException` | DynamoDB | Tabla no existe | Loguear error critico, fallar HTTP 500 |
+| `BotoClientError` | AWS SDK | Error general AWS | Reintentar exponencial, luego fallar |
+| `TimeoutError` | Bedrock/Aurora | Timeout > 5s (LLM) o 10s (DB) | Loguear, retornar error o fallback |
+| `JSONDecodeError` | LLM_Layer | Bedrock retorna JSON inválido | Reintentar 3 veces, luego fallback templado |
 
 ---
 
-### Casos Especiales
+### Casos de Uso: Degradación en Acción
 
-| Situación | Comportamiento |
-|---|---|
-| **Usuario sin información (confidence = 0.0)** | Generar pregunta inicial. Máximo 4 turnos antes de forza ranking con info disponible. |
-| **LLM genera pesos que no suman 1.0** | Normalizar automáticamente. Loguear warning. |
-| **Carrera sin datos de ingreso/costo** | Marcar como "no evaluable". Excluir de ranking si posible. Loguear warning. |
-| **Filtro geográfico retorna 0 resultados** | Ignorar filtro, retornar ranking global. Loguear info. |
-| **RAG consulta sin chunks relevantes** | Retornar `status="no_documents"`. Usuario recibe mensaje amigable. |
-| **Token expira durante solicitud larga** | Retornar HTTP 401 en siguiente check. Frontend maneja redirect a login. |
-| **DB no disponible para persistir feedback** | Almacenar en queue local (en-memoria o archivo temporal). Reintentar sincronización cada N segundos. |
-| **Embedding service no disponible** | Para RAG: retornar no_documents. Para afinidad: usar fallback 0.5. |
-| **Concurrent requests del mismo usuario** | Session_Manager usa locks para garantizar consistency. Requests se serializan por session_id. |
+| Situación | Comportamiento | Resultado Esperado |
+|---|---|---|
+| **Bedrock no disponible** | Fallback templado para explicaciones | Top-5 sin explicación personalizada (solo datos) |
+| **Aurora temporalmente inaccesible** | Queue local de feedback en Fargate (en-memoria) | Feedback guardado localmente, sincronizado cuando BD vuelva |
+| **Bedrock RIASEC tagging falla** | Family fallback (moda por family) | Ninguna carrera sin riasec_profile |
+| **Embeddings generación falla** | RAG desactivado, /chat continúa | Top-5 sin detalles extendidos |
+| **DynamoDB no respondiendo** | Fallback a listado global universidades | /universities retorna datos cacheados o vacío |
+| **JWT validación falla** | HTTP 401 inmediato | No hay fallback, re-autenticate requerido |
 
 ---
 
-### Logging
-
-**Mecanismo:** Librería `logging` estándar Python.
-
-**Formato:** JSON estructurado para facilitar parsing en producción.
-
-```json
-{
-  "timestamp": "2026-07-15T14:32:00Z",
-  "level": "INFO",
-  "component": "Orchestration",
-  "session_id": "550e8400-e29b-41d4-a716-446655440000",
-  "message": "Preferences interpreted",
-  "data": {
-    "interests": ["matemáticas", "análisis"],
-    "confidence_score": 0.82,
-    "weights_generated": {"affinity": 0.4, "salary": 0.3, "cost": 0.2, "admission": 0.1}
-  }
-}
-```
-
-**Niveles:**
-- `DEBUG`: Detalles de ejecución (valores intermedios, decisiones de ramificación).
-- `INFO`: Eventos normales (request recibida, ranking generado, feedback guardado).
-- `WARNING`: Anomalías no fatales (pesos renormalizados, imputación fallback, timeout LLM).
-- `ERROR`: Fallos capturados (JSON inválido, DB error, archivo no encontrado).
-- `CRITICAL`: Fallos irrecuperables (sistema no puede continuar).
-
-**Destino:** stdout (para contenedor Docker) + archivo local (opcional, para persistencia).
-
-**Configuración:**
+## Configuración de Logging (Actualizado)
 
 ```python
 import logging
 import json
-from logging import Formatter
+from datetime import datetime
+import boto3
 
-class JSONFormatter(Formatter):
+class JSONFormatter(logging.Formatter):
     def format(self, record):
         log_obj = {
-            "timestamp": self.formatTime(record),
+            "timestamp": datetime.utcnow().isoformat() + "Z",
             "level": record.levelname,
             "component": record.name,
-            "message": record.getMessage()
+            "message": record.getMessage(),
+            "session_id": getattr(record, "session_id", None),
+            "function": record.funcName,
+            "line": record.lineno,
+            "extra": getattr(record, "extra_data", {})
         }
+        # Nunca loguear tokens completos, claves AWS
+        if "token" in str(log_obj).lower():
+            log_obj["warning"] = "token_field_present_but_hidden"
         return json.dumps(log_obj)
 
-handler = logging.StreamHandler()
+# Configurar logging
+handler = logging.StreamHandler()  # stdout (Docker)
 handler.setFormatter(JSONFormatter())
+
 logger = logging.getLogger("careermatch")
 logger.addHandler(handler)
 logger.setLevel(logging.INFO)  # Configurable por LOG_LEVEL env var
+
+# Ejemplo de uso con contexto
+logger.info("Ranking generated", extra={
+    "extra_data": {
+        "session_id": session_id,
+        "top_5_count": 5,
+        "confidence_score": 0.85
+    }
+})
+```
+
+**Destino:** 
+- **CloudWatch Logs** (producción): Logs automáticos vía Fargate/Lambda
+- **stdout** (desarrollo): Visible en `docker logs`
+- **Archivo local** (opcional): Para persistencia local
+
+---
+
+## Docker & Containerización
+
+### Dockerfile (Fargate Agent)
+
+```dockerfile
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Instalar uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+# Instalar dependencias del sistema
+RUN apt-get update && apt-get install -y \
+    gcc \
+    postgresql-client \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copiar archivos de dependencias
+COPY pyproject.toml uv.lock ./
+RUN uv sync --no-dev
+
+# Copiar código
+COPY backend/ ./backend/
+COPY data/ ./data/
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Entrypoint
+CMD ["uv", "run", "uvicorn", "backend.app:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+### docker-compose.yml (Desarrollo Local)
+
+```yaml
+version: '3.9'
+
+services:
+  # Backend Fargate (simulado)
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      AWS_REGION: us-east-1
+      LLM_PROVIDER: bedrock
+      AURORA_ENDPOINT: postgres_db:5432
+      ENVIRONMENT: development
+    depends_on:
+      - postgres_db
+    volumes:
+      - ./backend:/app/backend
+      - ./data:/app/data
+    networks:
+      - careermatch_net
+
+  # PostgreSQL local (simular Aurora)
+  postgres_db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: careermatch
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - careermatch_net
+
+volumes:
+  postgres_data:
+
+networks:
+  careermatch_net:
+    driver: bridge
+```
+
+**Ejecución local:**
+
+```bash
+docker-compose up -d
+# Backend disponible en http://localhost:8000
+# PostgreSQL en localhost:5432
 ```
 
 ---
 
-## Propiedades de Corrección
+## Propiedades de Corrección (Revisadas)
 
 ### Propiedad 1: Determinismo de Ranking
 
-*Para cualquier* input (affinity_scores, features.csv, weights, filters) idéntico, `Scoring_Engine.rank_all_careers()` SHALL retornar exactamente el mismo ranking (orden de resultados) en 100% de ejecuciones.
+**Invariante:** Mismo input (profile, features.csv, weights, filters) → mismo ranking Top-5 en 100% ejecuciones.
 
-**Valida:** Requerimiento 24 criterio 1, Requerimiento 9 criterio 8
+**Validación:**
+- Test de determinismo en `tests/test_scoring_determinism.py`
+- Ejecuta `rank_and_filter()` 100 veces con input idéntico
+- Verifica que resultado es idéntico byte-a-byte
 
-**Justificación:** Todas las operaciones de scoring son determinísticas (sin randomness, sin floating-point no-determinístico, orden de iteración fijado). Desempate alfabético garantiza orden único en empates.
+```python
+def test_determinism():
+    for _ in range(100):
+        result = scoring_engine.rank_and_filter(profile, features_df)
+        assert result == first_result  # Comparación completa
+```
 
 ---
 
 ### Propiedad 2: Validez de Pesos
 
-*Para cualquier* `InterpretationResult` generado por `LLM_Layer.interpret_preferences()`, el campo `weights_generated` SHALL satisfacer: cada wᵢ ∈ [0, 1] Y Σwᵢ ∈ [0.99, 1.01].
+**Invariante:** Pesos siempre cumplen: cada wᵢ ∈ [0,1] AND Σwᵢ ∈ [0.99, 1.01]
 
-**Valida:** Requerimiento 23 criterio 2, Requerimiento 3 criterio 5
+**Validación:**
+- Test en `tests/test_llm_weights_validity.py`
+- Genera 1000 pesos aleatorios vía `calculate_weights_from_ranking()`
+- Verifica invariante en todos
 
-**Justificación:** Pesos inválidos invierten el sentido del scoring. Validación ocurre en `LLM_Layer.validate_weights()` + normalización automática en `Orchestration_Layer`.
+```python
+def test_weights_validity():
+    for _ in range(1000):
+        weights = calculate_weights_from_ranking(random_order)
+        assert all(0 <= w <= 1 for w in weights.values())
+        assert 0.99 <= sum(weights.values()) <= 1.01
+```
 
 ---
 
 ### Propiedad 3: Aislamiento de Sesión
 
-*Para cualquier* dos usuarios con `session_id_A ≠ session_id_B`, datos persistidos en `Feedback_Storage` de usuario A SHALL NO ser accesibles por querys de usuario B, incluso si B posee acceso físico a base de datos.
+**Invariante:** Usuario A NO accede datos de usuario B, incluso si B es atacante.
 
-**Valida:** Requerimiento 19 criterio 5, Requerimiento 11 criterio 4
-
-**Justificación:** `Feedback_Storage` filtra todas las querys por `session_id`. Schema de base de datos incluye `session_id` como restricción de acceso primaria.
-
----
-
-### Propiedad 4: Reproducibilidad de Recomendación
-
-*Para cualquier* ranking generado en fecha T con dataset snapshot S y configuración C, evaluador con acceso a S y C SHALL poder recalcular exactamente el mismo ranking ejecutando `Scoring_Engine` de forma offline.
-
-**Valida:** Requerimiento 24 criterio 2–4, Requerimiento 16 criterio 5–7
-
-**Justificación:** Snapshots versionados preservan estado exacto. Algoritmo de scoring es determinístico. `Feedback_Record` incluye `reproducibility_metadata` vinculando snapshot utilizado.
-
----
-
-### Propiedad 5: Confidence Score Monótono
-
-*Para cualquier* `UserProfile`, si se agrega información (campo null → valor), `confidence_score` SHALL aumentar o mantenerse igual (nunca disminuir).
-
-**Valida:** Requerimiento 4 criterio 2–3, Requerimiento 2 criterio 3
-
-**Justificación:** Confidence se calcula como `campos_llenos / campos_requeridos`. Más campos llenos → mayor confianza.
-
----
-
-## Estrategia de Testing
-
-### Enfoque General
-
-- **Unitarias:** Cada módulo (`Auth_Service`, `Scoring_Engine`, `LLM_Layer`, etc.) tiene tests independientes.
-- **Integración:** Flujo end-to-end (/chat → /feedback) validado con datos reales.
-- **Propiedades:** Verificar invariantes clave (determinismo, validez, aislamiento).
-- **Ejemplos:** 3–5 casos por función (nominal, bordes, errores, fallback).
-- **Errores:** Tests para cada ruta de excepción y fallback.
-
-### Librerías y Herramientas
-
-| Librería | Versión | Propósito | Instalación |
-|---|---|---|---|
-| **pytest** | 7.0.0+ | Test runner | `pip install pytest>=7.0.0` |
-| **pytest-asyncio** | 0.21.0+ | Tests async | `pip install pytest-asyncio>=0.21.0` |
-| **unittest.mock** | Stdlib | Mocking | Incluido en Python |
-| **requests** | 2.31.0+ | HTTP client para API tests | `pip install requests>=2.31.0` |
-
-**Ejecución:**
-
-```bash
-pytest tests/ -v --cov=backend,data_pipeline --cov-report=html
-```
-
----
-
-### Tests de Propiedad
-
-| Archivo | Propiedad | Descripción |
-|---|---|---|
-| `tests/test_scoring_determinism.py` | Propiedad 1 | Ranking idéntico en múltiples ejecuciones con mismo input |
-| `tests/test_llm_weights_validity.py` | Propiedad 2 | Pesos siempre válidos (suma 1.0, componentes [0,1]) |
-| `tests/test_session_isolation.py` | Propiedad 3 | Usuario A no accede datos de usuario B |
-| `tests/test_scoring_reproducibility.py` | Propiedad 4 | Ranking reproducible con snapshots versionados |
-| `tests/test_confidence_monotonicity.py` | Propiedad 5 | Confidence aumenta con información adicional |
-
----
-
-### Tests de Ejemplo
-
-| Archivo | Criterio | Descripción |
-|---|---|---|
-| `tests/test_auth.py` | Reqs 1–2 | Token generation, validation, revocation, expiration |
-| `tests/test_session_manager.py` | Reqs 2, 19 | Context creation, profile update, turn append, isolation |
-| `tests/test_llm_interpretation.py` | Reqs 3–4 | Preference interpretation, confidence calculation, follow-up generation |
-| `tests/test_llm_explanation.py` | Req 10 | Explanation generation, data accuracy, fallback |
-| `tests/test_scoring_engine.py` | Reqs 7–9 | Score calculation, ranking, filtering, determinism |
-| `tests/test_affinity_calculation.py` | Req 7 | Affinity method A (embeddings) or B (mapping) |
-| `tests/test_feedback_storage.py` | Reqs 11, 19 | Ranking persistence, validation update, isolation |
-| `tests/test_orchestration.py` | Req 14–15 | Full /chat and /feedback flows |
-| `tests/test_error_handling.py` | Req 18 | LLM fallback, afinidad fallback, DB queue, graceful degradation |
-| `tests/test_pipeline_ingestion.py` | Req 5–6 | Download, snapshot creation, cleaning, imputation |
-
----
-
-### Tests de Integración
-
-| Archivo | Criterio | Descripción |
-|---|---|---|
-| `tests/integration/test_chat_flow.py` | Reqs 1–4, 7–15 | Full chat flow: auth → interpret → score → explain → feedback |
-| `tests/integration/test_rag_flow.py` | Req 12 | Full RAG flow: auth → query → retrieve → generate |
-| `tests/integration/test_pipeline_to_scoring.py` | Reqs 5–9 | Pipeline output usable by Scoring_Engine |
-| `tests/integration/test_session_persistence.py` | Reqs 2, 19 | Multi-turn conversation with context persistence |
-
----
-
-### Fixtures
+**Validación:**
+- Test en `tests/test_session_isolation.py`
+- Crea 2 sesiones, intenta acceso cruzado
+- Verifica HTTP 403 o datos vacíos
 
 ```python
-# tests/conftest.py
-
-import pytest
-from backend.models import UserProfile, InterpretationResult
-import pandas as pd
-
-@pytest.fixture
-def sample_user_profile():
-    return UserProfile(
-        interests=["matemáticas", "análisis"],
-        salary_priority=0.8,
-        cost_sensitivity=0.9,
-        admission_tolerance=0.5,
-        geographic_preference="Lima",
-        institution_type_preference=None,
-        confidence_score=0.85,
-        confidence_reasoning=""
-    )
-
-@pytest.fixture
-def sample_features_df():
-    """Simulated features.csv."""
-    return pd.DataFrame({
-        "career": ["Estadística", "Ingeniería Civil", "Derecho"],
-        "institution": ["UNMSM", "UNI", "PUCP"],
-        "location": ["Lima", "Lima", "Lima"],
-        "institution_type": ["Universidad", "Universidad", "Universidad"],
-        "income_score": [0.85, 0.82, 0.65],
-        "cost_score": [0.90, 0.75, 0.40],
-        "admission_score": [0.60, 0.50, 0.80],
-        "monthly_income": [3200, 3100, 2400],
-        "annual_cost": [1200, 2000, 5000],
-        "admission_rate": [18, 15, 25],
-        "duration_years": [5, 5, 6]
-    })
-
-@pytest.fixture
-def mock_llm_service():
-    """Mock LLM que retorna respuestas predeterminadas."""
-    class MockLLM:
-        def interpret_preferences(self, user_input, session_context=None):
-            return InterpretationResult(
-                interests=["matemáticas"],
-                salary_priority=0.8,
-                cost_sensitivity=0.9,
-                admission_tolerance=0.5,
-                geographic_preference="Lima",
-                institution_type_preference=None,
-                missing_info=[],
-                confidence_score=0.85,
-                confidence_reasoning="",
-                suggested_follow_up=None,
-                raw_llm_response="{...}"
-            )
-    return MockLLM()
-
-@pytest.fixture
-def sample_weights():
-    return {
-        "affinity": 0.40,
-        "salary": 0.30,
-        "cost": 0.20,
-        "admission": 0.10
-    }
-
-@pytest.fixture
-def sample_affinity_scores():
-    """Array de afinidades para dataset de ejemplo."""
-    return [0.85, 0.60, 0.20]
+def test_isolation():
+    session_a = auth_service.create_session()
+    session_b = auth_service.create_session()
+    
+    # Intentar acceso cruzado
+    result = feedback_storage.get_feedback(session_b['session_id'], 
+                                            session_a['session_id'])
+    assert result is None or len(result) == 0
 ```
 
 ---
 
-### Configuración de Testing
+### Propiedad 4: Reproducibilidad
 
-```bash
-# pytest.ini
-[pytest]
-testpaths = tests
-python_files = test_*.py
-python_classes = Test*
-python_functions = test_*
-asyncio_mode = auto
-addopts = --tb=short --strict-markers -v
-markers =
-    unit: Unit tests
-    integration: Integration tests
-    slow: Slow tests
-    property: Property-based tests
+**Invariante:** Ranking recalculable offline con snapshot + config + prompt version.
 
-# .coveragerc
-[run]
-source = backend, data_pipeline
-omit = 
-    */tests/*
-    */venv/*
-
-[report]
-exclude_lines =
-    pragma: no cover
-    def __repr__
-    raise AssertionError
-    raise NotImplementedError
-    if __name__ == .__main__.:
-    if TYPE_CHECKING:
-```
+**Validación:**
+- Test en `tests/test_scoring_reproducibility.py`
+- Guarda snapshot en turno 1
+- Recalcula ranking en turno 2 con mismo snapshot
+- Verifica ranking idéntico
 
 ---
 
-## Estructura del Proyecto
+### Propiedad 5: Confianza Monótona
+
+**Invariante:** Agregar información → confidence nunca disminuye.
+
+**Validación:**
+- Test en `tests/test_confidence_monotonicity.py`
+- Secuencia de perfiles: vacío → +riasec → +pesos → +filtros
+- Verifica: conf[i] >= conf[i-1]
+
+---
+
+## Estructura de Proyecto (AWS Versión)
 
 ```
 careermatch-peru/
 │
 ├── README.md
-│   └── Instrucciones de instalación, uso, estructura
+│   └── Setup, variables AWS, estructura
 │
-├── requirements.txt
-│   └── Dependencias Python
+├── pyproject.toml
+│   └── Gestión de dependencias con uv
+├── uv.lock
+│   └── Lock file generado automáticamente por uv
 │
 ├── .env.example
-│   └── Template de variables de entorno
+│   └── Template AWS (AURORA_ENDPOINT, JWT_SECRET, etc.)
 │
 ├── .gitignore
-│   └── Archivos ignorados (*.pyc, .env, data/, venv/, etc.)
+│   └── *.pyc, .env, data/, snapshots/, venv/, __pycache__/
 │
 ├── Dockerfile
-│   └── Imagen Docker para backend
+│   └── Image para Fargate (Python 3.10, FastAPI, Uvicorn)
 │
 ├── docker-compose.yml
-│   └── Orquestación local (backend + DB local)
+│   └── Local: backend Fargate + PostgreSQL local
 │
 ├── backend/
 │   ├── __init__.py
-│   ├── app.py                   # FastAPI entry point + endpoints
-│   ├── auth.py                  # Auth_Service
-│   ├── session.py               # Session_Manager
-│   ├── llm_service.py           # LLM_Layer
-│   ├── scoring.py               # Scoring_Engine
-│   ├── rag.py                   # RAG_Module
-│   ├── embedding.py             # Embedding_Service
-│   ├── feedback.py              # Feedback_Storage
-│   ├── orchestration.py         # Orchestration_Layer
-│   ├── models.py                # Pydantic schemas (UserProfile, etc.)
-│   ├── utils.py                 # Logging, helpers, etc.
-│   ├── config.py                # Configuración centralizada
-│   └── requirements_backend.txt  # Dependencias backend específicas (si se separan)
+│   ├── app.py                   # FastAPI Fargate entrypoint
+│   ├── auth.py                  # JWT sin estado
+│   ├── session.py               # SessionManager (in-memory TTL)
+│   ├── llm_service.py           # Bedrock Claude
+│   ├── scoring.py               # ScoringEngine determinístico
+│   ├── rag.py                   # pgvector Aurora
+│   ├── embedding.py             # Bedrock Titan Embeddings
+│   ├── feedback.py              # Aurora PostgreSQL persistence
+│   ├── orchestration.py         # Orchestration (Bloques A/B/C)
+│   ├── models.py                # Pydantic StudentProfile, etc.
+│   ├── config.py                # Config centralizada (AWS vars)
+│   └── utils.py                 # Logging JSON, helpers AWS
+│
+├── backend_lambda/              # Handlers Lambda (opcional, si se separan)
+│   ├── session_handler.py       # POST /session/create
+│   ├── feedback_handler.py      # POST /feedback
+│   └── universities_handler.py  # GET /universities
 │
 ├── data_pipeline/
 │   ├── __init__.py
-│   ├── ingestion.py             # Descarga Ponte en Carrera
-│   ├── data_clean.py            # Limpieza + estandarización
+│   ├── ingestion.py             # Selenium Ponte en Carrera
+│   ├── data_clean.py            # Limpieza pandas
 │   ├── feature_engineering.py   # Imputación + normalización
-│   ├── config.py                # Config compartido pipeline
-│   ├── utils.py                 # Utilidades pipeline
-│   └── requirements_pipeline.txt # Dependencias pipeline (si se separan)
+│   ├── riasec_tagging.py        # Bedrock few-shot + validation
+│   ├── config.py                # Config AWS S3, Bedrock
+│   └── utils.py                 # Helpers pipeline
 │
 ├── frontend/
-│   ├── index.html               # HTML principal
-│   ├── styles.css               # Estilos (responsive)
-│   ├── app.js                   # Lógica principal (clase CareerMatchApp)
+│   ├── index.html
+│   ├── styles.css
+│   ├── app.js                   # CareerMatchApp (clase JS)
 │   ├── components/
-│   │   ├── chat.js              # Lógica de chat conversacional
-│   │   ├── ranking.js           # Visualización de ranking
-│   │   ├── feedback.js          # Validación Likert
-│   │   └── rag_panel.js         # Panel de detalles RAG
+│   │   ├── chat.js
+│   │   ├── ranking.js
+│   │   ├── feedback.js
+│   │   └── rag_panel.js
 │   └── utils/
-│       ├── api.js               # Wrappers de fetch a endpoints
-│       ├── auth.js              # Gestión de tokens en cliente
-│       └── storage.js           # localStorage helpers
+│       ├── api.js               # Wrappers fetch
+│       ├── auth.js              # localStorage tokens
+│       └── storage.js           # Helpers
 │
 ├── data/
 │   ├── .gitkeep
-│   ├── raw.xlsx                 # Última descarga (no versionar)
-│   ├── filtered.csv             # Última versión limpia
-│   ├── features.csv             # Última versión normalizada
-│   ├── feature_config.json      # Config de imputación
-│   ├── AFINIDAD_METHOD.md        # Documentación
-│   ├── SCORING_STRATEGY.md       # Documentación
-│   └── career_affinity_mapping.json  # (opcional, si método B)
+│   ├── raw.xlsx                 # No versionar
+│   ├── filtered.csv             # No versionar
+│   ├── features.csv             # No versionar
+│   ├── feature_config.json      # No versionar
+│   └── AFINIDAD_METHOD.md
 │
 ├── snapshots/
-│   ├── raw/
-│   │   ├── .gitkeep
-│   │   └── raw_*.xlsx           # Histórico (no versionar)
-│   ├── features/
-│   │   ├── .gitkeep
-│   │   └── features_*.csv       # Histórico (no versionar)
-│   └── configs/
-│       ├── .gitkeep
-│       └── feature_config_*.json  # Histórico (no versionar)
-│
-├── notebooks/
-│   ├── 00_exploratory_data_analysis.ipynb
-│   ├── 01_pipeline_validation.ipynb
-│   ├── 02_affinity_calculation.ipynb
-│   └── 03_demo_integration.ipynb
+│   ├── raw/                     # No versionar
+│   ├── features/                # No versionar
+│   └── configs/                 # No versionar
 │
 ├── tests/
-│   ├── conftest.py              # Fixtures compartidas
+│   ├── conftest.py
 │   ├── test_auth.py
-│   ├── test_session_manager.py
 │   ├── test_llm_service.py
-│   ├── test_llm_explanation.py
 │   ├── test_scoring_engine.py
-│   ├── test_affinity.py
 │   ├── test_feedback_storage.py
 │   ├── test_orchestration.py
-│   ├── test_rag.py
-│   ├── test_error_handling.py
-│   ├── test_pipeline_ingestion.py
-│   ├── test_pipeline_clean.py
-│   ├── test_pipeline_features.py
 │   ├── test_scoring_determinism.py
 │   ├── test_llm_weights_validity.py
 │   ├── test_session_isolation.py
@@ -3221,39 +3779,108 @@ careermatch-peru/
 │   ├── integration/
 │   │   ├── test_chat_flow.py
 │   │   ├── test_rag_flow.py
-│   │   ├── test_pipeline_to_scoring.py
 │   │   └── test_session_persistence.py
-│   ├── fixtures/
-│   │   ├── sample_features.csv
-│   │   ├── sample_profiles.json
-│   │   └── mock_ranking_responses.json
-│   └── .coveragerc              # Configuración de cobertura
+│   └── fixtures/
+│       └── sample_features.csv
 │
 ├── docs/
-│   ├── ARCHITECTURE.md           # Visión técnica general
-│   ├── API.md                    # Especificación REST (endpoints, ejemplos)
-│   ├── DEVELOPMENT.md            # Guía para desarrolladores (setup, convenciones)
-│   ├── DEPLOYMENT.md             # Despliegue (Docker, variables entorno, checklist)
-│   ├── DECISIONS.md              # Log de decisiones de diseño
-│   └── TROUBLESHOOTING.md        # FAQ y debugging (opcional)
+│   ├── ARCHITECTURE.md          # AWS: Bedrock, Aurora, DynamoDB, Lambda, Fargate
+│   ├── API.md                   # REST endpoints (/chat, /feedback, /rag)
+│   ├── DEVELOPMENT.md           # Setup local, convenciones
+│   ├── DEPLOYMENT.md            # AWS SAM, Fargate, CloudFormation
+│   ├── DECISIONS.md             # Log de decisiones (AWS vs. local)
+│   └── AWS_SETUP.md             # Guía AWS (Bedrock, Aurora, IAM, etc.)
 │
 ├── scripts/
-│   ├── run_pipeline.py           # Master script para ejecutar pipeline
-│   ├── setup_db.py               # Inicializar base de datos
-│   ├── generate_snapshots.py     # Utilidad para generar snapshots (opcional)
-│   └── test_coverage.sh          # Script para reporte de cobertura
+│   ├── run_pipeline.py          # Master pipeline script
+│   ├── setup_aurora.py          # Crear tablas Aurora
+│   ├── setup_dynamodb.py        # Crear tabla universities
+│   ├── setup_bedrock.py         # Verificar modelo Bedrock disponible
+│   └── test_coverage.sh         # Reporte cobertura
+│
+├── infra/                       # Infrastructure as Code (opcional)
+│   ├── cloudformation/
+│   │   ├── aurora.yaml          # Aurora PostgreSQL stack
+│   │   ├── dynamodb.yaml        # DynamoDB table
+│   │   ├── lambda.yaml          # Lambda functions
+│   │   └── fargate.yaml         # Fargate service
+│   └── terraform/               # Alternativa a CloudFormation
+│       ├── main.tf
+│       ├── variables.tf
+│       └── outputs.tf
 │
 └── .github/
-    └── workflows/
-        ├── ci.yml                # GitHub Actions para tests (opcional)
-        └── deploy.yml            # GitHub Actions para deploy (opcional)
+    └── workflows/               # GitHub Actions (opcional)
+        ├── ci.yml               # Tests, cobertura
+        └── deploy.yml           # Deploy a AWS
 ```
-
-**Notas sobre versionado:**
-- Archivos en `data/`, `snapshots/` NO se versionan en Git (añadir a `.gitignore`).
-- `notebooks/` SÍ se versionan para referencia y reproducibilidad.
-- Código fuente en `backend/`, `frontend/`, `data_pipeline/`, `tests/` SÍ se versionan.
 
 ---
 
-**Fin del Documento de Diseño**
+## Checklist de Implementación
+
+### Fase 1: Configuración AWS
+
+- [ ] Crear AWS Account (o usar existente)
+- [ ] Crear IAM user con permisos: Bedrock, Aurora, DynamoDB, Lambda, Fargate, S3, CloudWatch
+- [ ] Descargar AWS credentials
+- [ ] Instalar AWS CLI y configurar profile
+- [ ] Verificar acceso a Bedrock: `aws bedrock list-foundation-models`
+
+### Fase 2: Recursos AWS
+
+- [ ] Crear Aurora PostgreSQL cluster (1x instance `db.t3.medium` para demo)
+- [ ] Crear DynamoDB tabla `universities`
+- [ ] Crear S3 bucket para snapshots (opcional)
+- [ ] Crear CloudWatch log group para Fargate
+- [ ] Crear ECR repository para imagen Docker
+
+### Fase 3: Desarrollo Local
+
+- [ ] Clonar repositorio
+- [ ] Instalar Python 3.10+ y `uv` (ver [astral.sh/uv](https://docs.astral.sh/uv/#installation))
+- [ ] `uv sync`
+- [ ] Copiar `.env.example` → `.env` y llenar variables AWS
+- [ ] `docker-compose up -d` (backend + PostgreSQL local para testing)
+
+### Fase 4: Backend
+
+- [ ] Implementar `backend/app.py` (FastAPI endpoints)
+- [ ] Implementar `backend/llm_service.py` (Bedrock Claude)
+- [ ] Implementar `backend/scoring.py` (determinístico)
+- [ ] Implementar `backend/feedback.py` (Aurora)
+- [ ] Tests unitarios: `uv run pytest tests/test_*.py -v`
+
+### Fase 5: Pipeline de Datos
+
+- [ ] Implementar `data_pipeline/ingestion.py` (Selenium)
+- [ ] Implementar `data_pipeline/feature_engineering.py` (normalización)
+- [ ] Implementar `data_pipeline/riasec_tagging.py` (Bedrock few-shot)
+- [ ] Generar `data/features.csv` (snapshot 1)
+- [ ] Tests: `uv run pytest tests/test_pipeline_*.py -v`
+
+### Fase 6: Frontend
+
+- [ ] Implementar `frontend/app.js` (CareerMatchApp)
+- [ ] Testing manual: `/chat` → `/feedback` → `/rag`
+- [ ] Responsividad en móvil
+
+### Fase 7: Despliegue AWS
+
+- [ ] Build Docker image: `docker build -t careermatch:latest .`
+- [ ] Push a ECR: `aws ecr get-login-password | docker login ...`
+- [ ] Crear Fargate service (ECS) con image ECR
+- [ ] Configurar ALB + VPC Link (Lambda → Fargate)
+- [ ] Crear Lambda functions para `/session/create`, `/feedback`, `/universities`
+- [ ] Configurar API Gateway (expone `/chat` vía Fargate, otros vía Lambda)
+
+### Fase 8: Testing & Monitoring
+
+- [ ] Verificar cobertura: `uv run pytest --cov --cov-report=html`
+- [ ] Setup CloudWatch alarms (Bedrock throttling, Aurora CPU, etc.)
+- [ ] Tests de carga (optional): verificar latencias
+- [ ] Verificar properties de corrección: determinismo, isolation, etc.
+
+---
+
+**Fin de la Sección de Stack Tecnológico (AWS)**
