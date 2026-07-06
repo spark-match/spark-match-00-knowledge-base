@@ -75,349 +75,9 @@ Lambda no es adecuado: timeout corto (15 min), stateless forzado, costo por llam
 
 ---
 
-## 3. Modelos de Datos
 
-### 3.1 `StudentProfile` (Bloque A, B, C)
 
-```python
-class StudentProfile:
-    # Bloque A — RIASEC (Etapa 1: gathering_info)
-    riasec_scores: dict[str, int]   # {"R":.., "I":.., "A":.., "S":.., "E":.., "C":..} [1,10]
-    riasec_code: str | None         # 3 letras, ej "RIA", calculado desde riasec_scores
-
-    # Bloque B — pesos dinámicos (Etapa 2), suman 1.0
-    w_afinidad: float     # [0,1], peso criterio afinidad RIASEC
-    w_ingreso: float      # [0,1], peso criterio ingresos esperados
-    w_costo: float        # [0,1], peso criterio costo
-    w_admision: float     # [0,1], peso criterio selectividad admisión
-    w_duracion: float     # [0,1], peso criterio duración en años
-
-    # Bloque C — filtros duros (no pesan, descartan)
-    region: str | None                  # Región de Perú (None = "me da igual")
-    tipo_institucion: str | None        # 'publica' | 'privada' | None
-    presupuesto_max: float | None       # Máximo costo anual (soles)
-    modalidad: str | None               # 'presencial' | 'virtual' | None
-
-    # Datos adicionales contextuales
-    interests: list[str]        # Áreas de interés mencionadas
-    strengths: list[str]        # Fortalezas percibidas
-    preferred_fields: list[str] # Campos específicos preferidos
-    dislikes: list[str]         # Áreas de rechazo
-```
-
-**Defaults:**
-- Si Bloque B no se prioriza tras 4 repreguntas: cada peso = `0.2` (suma 1).
-- Si usuario dice "no me importa X", ese peso = `0` y se re-normaliza el resto sumando 1.
-
-### 3.2 `CareerFeature` (fila de `features.csv`)
-
-| Campo | Tipo | Rango | Notas |
-|---|---|---|---|
-| `career_id` | str | — | Identificador único |
-| `career_name` | str | — | Nombre de carrera |
-| `institution` | str | — | Universidad que ofrece |
-| `riasec_profile` | str | 3 letras | Código Holland de la carrera (ej "RIA") |
-| `riasec_source` | enum | `seed` \| `llm_tagged` \| `family_fallback` \| `pending` | Trazabilidad del etiquetado |
-| `ingreso_norm` | float | [0,1] | `MinMax(log1p(ingreso_promedio))` |
-| `costo_norm` | float | [0,1] | `MinMax(log1p(costo_mensualidad))` |
-| `selectividad_norm` | float | [0,1] | `1 - MinMax(tasa_admision)` (mayor = más selectivo) |
-| `duracion_norm` | float | [0,1] | `MinMax(duracion_anios)` |
-| `region` | str | — | Región de la universidad |
-| `tipo_institucion` | enum | `publica` \| `privada` | Tipo de institución |
-| `duracion_anios` | float | — | Duración en años (dato verificable) |
-| `ingreso_promedio` | float | S/. / mes | Dato verificable del MINEDU |
-| `costo_mensualidad` | float | S/. | Dato verificable |
-| `tasa_admision` | float | % | Dato verificable |
-
-### 3.3 `RankingItem`
-
-```python
-class RankingItem:
-    career_id: str
-    career_name: str
-    institution: str
-    score: float                      # [0,1]
-    scores_por_criterio: dict         # {afinidad, ingreso, costo, admision, duracion} [0,1]
-    datos_verificables: dict          # {ingreso_promedio, costo_mensualidad, tasa_admision, duracion_anios}
-    explicacion: str                  # Generada por LLM_Layer
-```
-
-### 3.4 `SessionContext` (en memoria, Fargate)
-
-```python
-class SessionContext:
-    session_id: str
-    profile: StudentProfile
-    conversation_history: list[dict]      # [{role: 'user'|'bot', content: str, timestamp}]
-    turn_count: int                       # Contador de repreguntas (máx 4)
-    dialogue_state: str                   # 'gathering_info' | 'ready_for_recommendation'
-    created_at: float
-    ttl_seconds: int = 1800               # Limpieza lazy por inactividad
-```
-
-### 3.5 `FeedbackRecord`
-
-```python
-class FeedbackRecord:
-    session_id: str
-    career_id: str
-    validation_score: int   # [1,5], fuera de rango → HTTP 422
-    timestamp: str          # ISO 8601 UTC
-```
-
----
-
-## 4. Algoritmos
-
-### 4.1 `calculate_riasec_code(riasec_scores: dict[str,int]) -> str`
-
-Ordena los 6 scores descendente, toma las 3 letras con mayor puntaje. Empates resueltos por orden alfabético (determinismo).
-
-**Ejemplo:**
-```
-riasec_scores = {"R": 8, "I": 9, "A": 7, "S": 6, "E": 5, "C": 4}
-→ Orden descendente: I(9), R(8), A(7), S(6), E(5), C(4)
-→ riasec_code = "IRA"
-```
-
-### 4.2 `calculate_affinity(student_code: str, career_profile: str) -> float`
-
-Peso posicional 3-2-1: si letra de carrera aparece en posición 1 del código suma 3, posición 2 suma 2, posición 3 suma 1 (0 si no aparece).
-
-**Fórmula:**
-```
-score_crudo = suma de pesos posicionales
-afinidad_norm = score_crudo / 18   [normalización explícita a [0,1]]
-```
-
-**Ejemplo:**
-```
-student_code = "RIA"
-career_profile = "RIA"  → R:pos1(+3), I:pos2(+2), A:pos3(+1) = 6/18 = 0.33
-career_profile = "AIR"  → A:pos3(+1), I:pos2(+2), R:pos1(+3) = 6/18 = 0.33
-career_profile = "SIA"  → I:pos2(+2), A:pos3(+1) = 3/18 = 0.17
-```
-
-### 4.3 `calculate_confidence(profile: StudentProfile) -> float`
-
-```
-riasec_completos = 1 si 6 riasec_scores presentes, 0 si no
-pesos_completos = cantidad de {w_afinidad, w_ingreso, w_costo, w_admision, w_duracion} no-null (máx 5)
-
-confidence = (riasec_completos * 6 + pesos_completos) / 11
-clamp a [0, 1]
-```
-
-**Umbrales:**
-- `confidence >= 0.70` → procede a ranking.
-- `turn_count >= 4` → fuerza ranking (degradación controlada), loguea `"graceful_degradation": true`.
-
-### 4.4 `calculate_weights_from_ranking(order: list[str]) -> dict[str,float]`
-
-Input: orden de 5 elementos según prioridad estudiante. Asigna puntaje 5-4-3-2-1 según posición, divide entre suma (`15`).
-
-**Ejemplo:**
-```
-order = ["afinidad", "ingreso", "costo", "admision", "duracion"]
-→ w_afinidad = 5/15 = 0.333
-→ w_ingreso = 4/15 = 0.267
-→ w_costo = 3/15 = 0.200
-→ w_admision = 2/15 = 0.133
-→ w_duracion = 1/15 = 0.067
-suma = 1.0 ✓
-```
-
-### 4.5 `normalize_variable(values, log_transform: bool, invert: bool) -> np.ndarray`
-
-MinMax estándar sobre columna; si `log_transform=True` aplica `log1p` antes; si `invert=True` retorna `1 - MinMax(...)`.
-
-**Usos:**
-- `ingreso_norm`: `log=True, invert=False` (mayor ingreso → mayor score)
-- `costo_norm`: `log=True, invert=False` (inversión ocurre en fórmula final)
-- `duracion_norm`: `log=False, invert=False` (mayor duración → mayor score)
-- `selectividad_norm`: `log=False, invert=True` (mayor admisión → menor selectividad)
-
-### 4.6 `calculate_score(weights: dict, row: CareerFeature) -> float`
-
-```
-score = w_afinidad * afinidad_norm
-      + w_ingreso  * ingreso_norm
-      + w_costo    * (1 - costo_norm)          [inversión: menor costo mejor]
-      + w_admision * (1 - selectividad_norm)   [inversión: más fácil mejor]
-      + w_duracion * (1 - duracion_norm)       [inversión: más rápido mejor]
-```
-
-Todas las entradas y el resultado están en `[0,1]`.
-
-### 4.7 `rank_and_filter(profile: StudentProfile, features_df: DataFrame) -> list[RankingItem]`
-
-1. Aplica filtros duros del Bloque C (región, tipo institución, presupuesto, modalidad). Si usuario dijo "me da igual", no aplica ese filtro.
-2. Calcula `calculate_score` para cada fila restante.
-3. Ordena descendente por `score`.
-4. Desempate: si `abs(score_a - score_b) < 0.001`, orden alfabético ascendente por `institution`.
-5. Retorna **Top-5**.
-6. **Si `features_df` no carga, falla explícitamente** (no continúa con scoring vacío) — error HTTP 500.
-
-### 4.8 Pipeline de Etiquetado RIASEC (Bedrock + Validación Muestral)
-
-```
-tag_careers_with_bedrock(catalog_df, seed_examples: list[10 carreras]) → DataFrame
-    Para cada carrera sin riasec_profile:
-        prompt = few-shot con las 10 carreras semilla
-        prompt += {career_name, field, descripción}
-        Bedrock (Claude-3.5-Sonnet) responde: {"riasec_profile": "XXX", "confidence": 0.0-1.0}
-        Si respuesta inválida (3 reintentos): riasec_source = "pending"
-        Si válida: riasec_profile = XXX, riasec_source = "llm_tagged"
-
-validate_sample(df, sample_size=300, seed=42) → CSV para revisión humana
-    Muestra aleatoria determinística de carreras "llm_tagged"
-    Exporta a data/riasec_validation_sample.csv
-
-apply_family_fallback(df) → DataFrame
-    Para carreras con riasec_source == "pending":
-        Asigna riasec_profile = perfil dominante de su field (moda)
-        riasec_source = "family_fallback"
-    (Ninguna carrera queda sin riasec_profile al finalizar)
-```
-
----
-
-## 5. LLM_Layer (Amazon Bedrock)
-
-```python
-class LLMLayer:
-    def __init__(self, provider: str = "bedrock", model: str = "anthropic.claude-3-5-sonnet"):
-        ...
-
-    def interpret_bloque_a(self, message: str, history: list[dict]) -> dict:
-        """Extrae/actualiza riasec_scores parciales desde lenguaje natural."""
-
-    def interpret_bloque_b(self, message: str, history: list[dict]) -> dict:
-        """Extrae orden de prioridades (B1) o ajustes directos → pesos parciales."""
-
-    def interpret_bloque_c(self, message: str, history: list[dict]) -> dict:
-        """Extrae filtros duros: región, tipo institución, presupuesto, modalidad."""
-
-    def generate_follow_up(self, profile: StudentProfile, missing_info: list[str]) -> str:
-        """Pregunta abierta, no repite lo ya respondido."""
-
-    def generate_explanation(self, ranking_item: RankingItem, profile: StudentProfile) -> str:
-        """Explicación personalizada por recomendación."""
-
-    def validate_weights(self, weights: dict) -> dict:
-        """Valida que sumen 1 (± 0.01); si no, re-normaliza."""
-```
-
-**Comportamiento:**
-- JSON validado con **máx 3 reintentos**; si falla, continúa con respuesta templada (degradación).
-- `LLM_PROVIDER=bedrock` por defecto en `.env`.
-- Gemini/OpenAI retirados del código; no se implementan en este ciclo.
-
----
-
-## 6. Embedding_Service (Amazon Bedrock Titan Embeddings)
-
-```python
-class EmbeddingService:
-    def __init__(self, provider: str = "bedrock", model: str = "amazon.titan-embed-text-v2"):
-        ...
-    def embed(self, text: str) -> list[float]:
-        """Retorna embedding de 1024 dimensiones."""
-```
-
-Usado únicamente por `RAG_Module` (funcionalidad secundaria). Si falla, RAG se desactiva sin bloquear `/chat`.
-
----
-
-## 7. Vector DB — pgvector sobre Aurora PostgreSQL
-
-```sql
-CREATE EXTENSION IF NOT EXISTS vector;
-
-CREATE TABLE career_chunks (
-    id BIGSERIAL PRIMARY KEY,
-    career_id TEXT NOT NULL,
-    content TEXT NOT NULL,
-    embedding VECTOR(1024),
-    metadata JSONB,
-    created_at TIMESTAMPTZ DEFAULT now()
-);
-
-CREATE INDEX ON career_chunks USING ivfflat (embedding vector_cosine_ops);
-CREATE INDEX ON career_chunks(career_id);
-```
-
----
-
-## 8. Persistencia Relacional (Aurora PostgreSQL)
-
-```sql
-CREATE TABLE feedback (
-    id BIGSERIAL PRIMARY KEY,
-    session_id TEXT NOT NULL,
-    career_id TEXT NOT NULL,
-    validation_score SMALLINT NOT NULL CHECK (validation_score BETWEEN 1 AND 5),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX idx_feedback_session ON feedback(session_id);
-
-CREATE TABLE rankings (
-    id BIGSERIAL PRIMARY KEY,
-    session_id TEXT NOT NULL,
-    ranking_json JSONB NOT NULL,
-    reproducibility_metadata JSONB,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX idx_rankings_session ON rankings(session_id);
-```
-
-**Aislamiento:** Toda consulta filtra siempre por `session_id`.
-
----
-
-## 9. DynamoDB — Georreferencia
-
-```
-Tabla: universities
-  PK: institution_id (S)
-  Atributos: name, region, tipo_institucion, latitude, longitude, careers_ids (SS)
-  GSI: region-index (PK: region)
-```
-
-Consumida por Lambda (`/universities`) o frontend directo para mapa (Leaflet).
-
----
-
-## 10. Backend Híbrido — Endpoints
-
-| Endpoint | Runtime | Descripción |
-|---|---|---|
-| `POST /session/create` | Lambda | Genera `session_id` + JWT firmado (sin estado compartido) |
-| `POST /chat` | Fargate (ALB/VPC Link) | Orchestrator: valida JWT, mantiene `SessionContext`, ejecuta Bloques A/B/C, invoca Scoring, retorna ranking o follow-up |
-| `POST /feedback` | Lambda | Escribe `FeedbackRecord`, valida score ∈ [1,5] (422 si no) |
-| `GET /universities` | Lambda | Lee `DynamoDB.universities`, filtra por `region` (GSI) |
-
-**Autenticación:** JWT sin estado. Lambda emite, Fargate valida localmente sin llamada de red.
-
----
-
-## 11. Pipeline de Datos (Batch)
-
-```
-EventBridge (cron diario)
-    → AWS Batch job (o Fargate task, no Lambda por duración LLM)
-        1. ingestion.py — Selenium contra Ponte en Carrera (MINEDU)
-        2. data_clean.py — Estandarización, validación
-        3. feature_engineering.py — Normalización
-        4. riasec_tagging.py — Bedrock few-shot + family fallback
-        5. Genera snapshot: snapshots/features/features_{timestamp}.csv
-```
-
-Si portal MINEDU cambia estructura, se loguea timeout y mantiene última versión conocida.
-
----
-
-## 12. Requisitos (Trazabilidad)
+## 3. Requisitos (Trazabilidad)
 
 | Req | Criterio | Implementación |
 |---|---|---|
@@ -456,16 +116,7 @@ Si portal MINEDU cambia estructura, se loguea timeout y mantiene última versió
 
 ---
 
-## 13. Propiedades de Corrección
-
-- **Propiedad 1 — Determinismo**: Mismo input → mismo ranking en 100% ejecuciones. _(Req 5.2)_
-- **Propiedad 4 — Reproducibilidad**: Ranking recalculable offline con snapshot + config. _(Req 9.1)_
-- **Propiedad 5 — Confidence Monótono**: Agregar información → confidence nunca disminuye. _(Req 4.1)_
-- **Propiedad 6 — Pesos Válidos**: 5 pesos suman 1 (± 0.01) tras `validate_weights`. _(Req 2.1)_
-
----
-
-## 14. Restricciones Transversales
+## Restricciones Transversales
 
 - **Package manager:** `uv` (no Poetry/Conda, no pip puro).
 - **Framework Fargate:** FastAPI + Uvicorn.
@@ -474,7 +125,7 @@ Si portal MINEDU cambia estructura, se loguea timeout y mantiene última versió
 - **Credenciales:** Variables de entorno / AWS Secrets Manager (nunca hardcodeadas).
 ---
 
-## 5. Módulos Detallados (Actualizado)
+## 6. Módulos Detallados
 
 ### `backend/embedding.py` — Embedding_Service (Amazon Bedrock Titan)
 
@@ -2050,24 +1701,7 @@ class FeatureEngineer:
 
 ---
 
-## 15. Checklist de Implementación Consolidado
-
-- [ ] Implementar `backend/embedding.py` (Bedrock Titan)
-- [ ] Implementar `backend/llm_service.py` (Bedrock Claude-3.5-Sonnet, 3 bloques)
-- [ ] Implementar `backend/scoring.py` (5 criterios, Top-5, determinístico)
-- [ ] Implementar `backend/rag.py` (pgvector/Aurora)
-- [ ] Implementar `backend/feedback.py` (Aurora PostgreSQL)
-- [ ] Implementar `backend/orchestration.py` (flujo A/B/C, transiciones, degradación)
-- [ ] Implementar `backend/app.py` (FastAPI Fargate entrypoint)
-- [ ] Implementar `frontend/app.js` (gestor conversacional JS)
-- [ ] Implementar `data_pipeline/ingestion.py` (Selenium Ponte en Carrera)
-- [ ] Implementar `data_pipeline/data_clean.py` (estandarización)
-- [ ] Implementar `data_pipeline/feature_engineering.py` (normalización, imputación)
-- [ ] Tests de propiedades: Determinismo, Reproducibilidad, Confidence Monótono, Pesos Válidos
----
-# Modelos de Datos (Actualizado)
-
-## Modelos Principales
+### Modelos de Datos
 
 ### `StudentProfile` (Bloques A, B, C)
 
@@ -2310,9 +1944,9 @@ class FeedbackResponse:
 
 ---
 
-## Algoritmos Detallados
+### Algoritmos
 
-### Algoritmo 1: Cálculo de RIASEC Code
+#### Algoritmo 1: Cálculo de RIASEC Code
 
 **Pseudocódigo:**
 
@@ -2348,7 +1982,7 @@ Output: "IRA"
 
 ---
 
-### Algoritmo 2: Cálculo de Afinidad RIASEC
+#### Algoritmo 2: Cálculo de Afinidad RIASEC
 
 **Pseudocódigo:**
 
@@ -2403,7 +2037,7 @@ career_profile = "SIA"  → S:not_found(0), I:pos1(+2), A:pos2(+1) = 3 → 3/18 
 
 ---
 
-### Algoritmo 3: Cálculo de Confidence Score
+#### Algoritmo 3: Cálculo de Confidence Score
 
 **Pseudocódigo:**
 
@@ -2438,7 +2072,7 @@ END FUNCTION
 
 ---
 
-### Algoritmo 4: Cálculo de Pesos desde Orden de Prioridad
+#### Algoritmo 4: Cálculo de Pesos desde Orden de Prioridad
 
 **Pseudocódigo:**
 
@@ -2485,7 +2119,7 @@ suma = 1.0 ✓
 
 ---
 
-### Algoritmo 5: Normalización MinMax con Transformaciones
+#### Algoritmo 5: Normalización MinMax con Transformaciones
 
 **Pseudocódigo:**
 
@@ -2529,7 +2163,7 @@ duracion_norm = normalize_variable(duracion_anios, log=False, invert=False)
 
 ---
 
-### Algoritmo 6: Cálculo de Score de Concordancia (5 Criterios)
+#### Algoritmo 6: Cálculo de Score de Concordancia (5 Criterios)
 
 **Pseudocódigo:**
 
@@ -2573,7 +2207,7 @@ END FUNCTION
 
 ---
 
-### Algoritmo 7: Ranking Determinístico (Top-5)
+#### Algoritmo 7: Ranking Determinístico (Top-5)
 
 **Pseudocódigo:**
 
@@ -2673,7 +2307,7 @@ END FUNCTION
 
 ---
 
-### Algoritmo 8: Imputación Jerárquica (Data Pipeline)
+#### Algoritmo 8: Imputación Jerárquica (Data Pipeline)
 
 **Pseudocódigo:**
 
