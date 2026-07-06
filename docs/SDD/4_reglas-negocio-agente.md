@@ -3,8 +3,8 @@
 > **Status**: 🟡 draft 
 > **Fecha**: 2026-07-05
 > **Audiencia**: AI Devs, Backend, Data Engineers
-> Documento que fija el **flujo del agente** y las **reglas de negocio del scoring** para que
-> `2_requirements.md` y `3_design.md` en los puntos donde el diseño evolucionó (ver §7).
+> Documento que fija el **flujo del agente** y las **reglas de negocio del scoring**, y reconcilia
+> `2_requirements.md` y `3_design.md` en los puntos donde el diseño evolucionó (ver §8).
 
 ---
 
@@ -74,7 +74,11 @@ Los 4 pesos son **por persona**:
 | `selectividad_norm` | Qué tan difícil es entrar (tasa de admisión) | Ponte en Carrera / dato universidad |
 
 > **Afinidad (RIASEC):** el agente ya calcula el código Holland de 3 letras del estudiante y lo
-> compara con el `riasec_profile` de cada carrera (peso posicional 3-2-1). Ver POC `08-deep-agent`.
+> compara con el `riasec_profile` de cada carrera (peso posicional 3-2-1). Ver
+> `src/tools/matching.py` (`calculate_affinity`) en el POC `08-deep-agent`.
+> **Nota de implementación:** hoy `calculate_affinity` devuelve el score en **porcentaje (0–100)**;
+> para la fórmula de §3.1 hay que normalizarlo dividiendo entre 100. De los 4 términos de la
+> fórmula, **solo `afinidad` está implementado**; ver el detalle en §9.
 
 ---
 
@@ -199,7 +203,41 @@ Puntos donde el diseño evolucionó y hay que reconciliar los documentos de Davi
 
 ---
 
-## 9. Preguntas abiertas para la reunión
+## 9. Estado de implementación en el POC (`08-deep-agent`)
+
+> Contraste entre las reglas de este documento y lo que **ya está codificado** en el POC
+> `08-deep-agent` (rama `main`). Sirve para no asumir que el spec = implementación.
+
+### 9.1 Ya implementado ✅
+
+| Regla / concepto | Dónde vive en el código | Notas |
+|---|---|---|
+| Scores RIASEC 1–10 + derivación `riasec_code` (top-3) | `src/tools/assessment.py` → `evaluate_riasec_profile` | Ordena las 6 dimensiones desc. y toma las 3 mayores |
+| Afinidad con pesos posicionales **3-2-1** | `src/tools/matching.py` → `_riasec_similarity` | `weights = [3.0, 2.0, 1.0]` |
+| Cálculo del ranking Top-N por afinidad | `src/tools/matching.py` → `calculate_affinity` | `top_n=5` por defecto; ordena por score desc. |
+| Catálogo de carreras (MVP) | `src/tools/catalog.py` → `CAREER_CATALOG` (10 carreras) | Campos: `id, name, riasec_profile, description, skills, field, outlook` |
+| Búsqueda por texto/campo | `src/tools/catalog.py` → `search_careers` | Match de texto; **sin** filtros de descarte |
+| Perfil del estudiante (langmem) | `src/models/profile.py` → `StudentProfile` | 6 RIASEC, `riasec_code`, `interests`, `strengths`, `preferred_fields`, `dislikes`, identidad, `target_career`, `career_goals` |
+| Orquestación del ranking | `src/agent/subagents/matching.py` | Subagente `matching` (usa `search_careers` + `calculate_affinity`) |
+
+### 9.2 Aún NO implementado (spec pendiente) ❌
+
+| Regla del documento | Estado real en el código | Qué falta |
+|---|---|---|
+| Fórmula de scoring completa (§3.1) | Solo existe el término `afinidad`; los 3 términos económicos/admisión no | Añadir `ingreso`, `costo`, `selectividad` al cálculo |
+| Pesos dinámicos por persona `w_*` (§3.2) | No hay campos ni lógica; `calculate_affinity` no recibe pesos | Campos en `StudentProfile` + extender el tool o crear servicio de scoring |
+| Escala normalizada `[0,1]` de la afinidad (§3.1) | `calculate_affinity` devuelve **% (0–100)** | Normalizar (÷100) al integrar la fórmula |
+| Filtros duros del Bloque C (§4, §6.4) | `search_careers` no descarta por `region`/`tipo`/`presupuesto` | Lógica de filtrado previa al scoring |
+| Umbral `confidence ≥ 0.70` / máx. 4 repreguntas (§4) | El modelo tiene `profile_completeness` y `has_riasec_profile`, pero no un gate 0.70 ni contador de repreguntas | Implementar el gate en el flujo del agente |
+| Desempate alfabético por institución (§6.6) | El orden es solo por score desc. | Añadir criterio de desempate |
+| `features.csv` con campos económicos/geográficos (§7.2) | No existe; el `05-data-pipeline` aún no tiene datos | Construir el dataset (repo 05) |
+
+> **Implicación:** hoy el POC entrega un ranking **puramente vocacional (RIASEC)**. Las etapas 2–3
+> (pesos, filtros, datos económicos) del flujo de §4 son diseño pendiente de implementar.
+
+---
+
+## 10. Preguntas abiertas para la reunión
 
 1. LLM definitivo: **Bedrock vs Gemini** (impacta créditos).
 2. Fuente de datos única: **Ponte en Carrera vs SUNEDU (scraping) vs catálogo semilla**.
