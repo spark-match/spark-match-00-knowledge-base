@@ -9,7 +9,9 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
 ## Tareas
 
 - [ ] 1. Setup del proyecto
-  - [ ] 1.1 Crear estructura de directorios: `data_pipeline/`, `backend/`, `backend/lambda/`, `backend/persistence/`, `frontend/`, `infra/`, `tests/`, `tests/integration/`, `tests/fixtures/`, `data/`, `snapshots/`, `snapshots/raw/`, `snapshots/features/`, `snapshots/configs/`, `docs/`, `scripts/`, `notebooks/`.
+  > **Contexto monorepo:** Este proyecto vive dentro de `contexts/matching/` del monorepo FIEECS-CareerMatch-TFP. Las dependencias Python se gestionan con `uv` dentro de este subdirectorio; el resto del monorepo usa npm workspaces. Los hooks de lint/test del monorepo se integran vía `npm run lint` / `npm run test` (ver tarea 1.4).
+
+  - [ ] 1.1 Crear estructura de directorios dentro de `contexts/matching/`: `data_pipeline/`, `backend/`, `backend/lambda/`, `backend/persistence/`, `frontend/`, `infra/`, `tests/`, `tests/integration/`, `tests/fixtures/`, `data/`, `snapshots/`, `snapshots/raw/`, `snapshots/features/`, `snapshots/configs/`, `docs/`, `scripts/`, `notebooks/`.
   - [ ] 1.2 Inicializar proyecto con `uv` y agregar dependencias especificadas en `design.md` § Stack Tecnológico:
     - Ejecutar `uv init` para crear `pyproject.toml` base.
     - Agregar dependencias con `uv add`:
@@ -17,16 +19,25 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
       uv add "boto3>=1.28.0" "aws-lambda-powertools>=2.0.0" "fastapi>=0.104.0" "uvicorn>=0.24.0" "pydantic>=2.0.0" "psycopg2-binary>=2.9.0" "pgvector>=0.1.8" "sqlalchemy>=2.0.0" "PyJWT>=2.8.0" "cryptography>=41.0.0" "python-dotenv>=1.0.0" "pandas>=2.0.0" "numpy>=1.24.0" "openpyxl>=3.10.0" "selenium>=4.15.0" "requests>=2.31.0" "moto>=4.2.0"
       # NOTA: aws-lambda-powertools para logger/tracer/metrics en handlers Lambda de producción.
       # PyJWT y cryptography son opcionales para MVP (solo necesarios si se implementa JWT, tarea 16.O). Se incluyen por si el equipo decide activarlo.
-      uv add --dev "pytest>=7.0.0" "pytest-asyncio>=0.21.0" "pytest-cov>=4.1.0"
+      # ruff es el linter/formatter estándar del monorepo (la raíz ya tiene `ruff.toml`); reemplaza black, flake8 e isort.
+      uv add --dev "pytest>=7.0.0" "pytest-asyncio>=0.21.0" "pytest-cov>=4.1.0" "ruff>=0.1.0"
       ```
     - `uv sync` genera `uv.lock` automáticamente.
   - [ ] 1.3 Crear `.env.example` con variables de entorno: `AWS_REGION=us-east-1`, `LLM_PROVIDER=bedrock`, `LLM_MODEL=anthropic.claude-3-5-sonnet-20241022`, `EMBEDDING_PROVIDER=bedrock`, `EMBEDDING_MODEL=amazon.titan-embed-text-v2`, `AURORA_ENDPOINT=...`, `AURORA_PORT=5432`, `AURORA_USER=postgres`, `AURORA_PASSWORD=...`, `AURORA_DATABASE=careermatch`, `SCHEMA_NAME=career`, `LOG_LEVEL=INFO`, `ENVIRONMENT=development`, `JWT_SECRET=...`, `JWT_ALGORITHM=HS256`.
     - NOTA: `JWT_SECRET` y `JWT_ALGORITHM` son obligatorios y deben coincidir con los que usa Identity Context (Secrets Manager compartido, no un secreto propio del servicio de scoring/chat).
     - NOTA: La variable `EMBEDDING_MODEL=amazon.titan-embed-text-v2` es tentativa — pendiente verificar modelo real usado por AI Advisor (repo `08-deep-agent`). Idem para dimensión del vector (1024) y nombre de tabla (`career_chunks`).
   - [ ] 1.4 Crear `pytest.ini` con configuración: `testpaths = tests`, `python_files = test_*.py`, `asyncio_mode = auto`, `addopts = --tb=short -v`, markers para `unit`, `integration`, `property`. Configurar `.coveragerc` con `source = backend, data_pipeline`, umbrales mínimos 60%.
-  - [ ] 1.5 Crear `README.md` inicial con: descripción del proyecto, instrucciones de instalación (`uv sync`), guía de variables de entorno, estructura de directorios, fases de desarrollo, y comandos para ejecutar tests (`uv run pytest tests/ --cov`).
+    - **Integración monorepo:** El monorepo expone scripts npm (`npm run test`, `npm run lint`) que orquestan tests y linters de todos los workspaces. Para que los tests Python se ejecuten desde la raíz, el `package.json` raíz debe incluir un workspace script que llame a `uv run pytest` dentro de `contexts/matching/`. Similarmente, `npm run lint` debe invocar `uv run ruff check` en ese directorio. Estas integraciones se configuran en el `package.json` raíz del monorepo (no en este subproyecto).
+  - [ ] 1.5 Crear `README.md` inicial con: descripción del proyecto, contexto monorepo (especificar que esto vive en `contexts/matching/`), instrucciones de instalación (`uv sync`), guía de variables de entorno, estructura de directorios, fases de desarrollo, y comandos para ejecutar tests (`uv run pytest tests/ --cov`) y linter (`uv run ruff check .`).
   - [ ] 1.6 Crear `Dockerfile` para desarrollo local del Matching Context: imagen `python:3.10-slim`, instalar `uv` vía `COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/`, instalar dependencias de sistema (`gcc`, `postgresql-client`), copiar `pyproject.toml` y `uv.lock`, ejecutar `uv sync --no-dev`, exponer puerto 8000, healthcheck para `/health`, entrypoint `uv run uvicorn backend.app:app --host 0.0.0.0 --port 8000`. NOTA: Este Dockerfile es solo para desarrollo local del Matching Context, NO para el backend completo.
   - [ ] 1.7 Crear `docker-compose.yml` para desarrollo local: servicio `backend` (imagen from Dockerfile, ports 8000:8000, env vars, volumes para código y datos), servicio `postgres_db` (imagen postgres:15-alpine, ports 5432:5432, env POSTGRES_USER/PASSWORD/DB), volumen `postgres_data`, red `careermatch_net`.
+  - [ ] 1.8 Crear `contexts/matching/ruff.toml` (o extender el `ruff.toml` raíz) con configuración para el subproyecto Python:
+    - `target-version = "py312"`.
+    - `select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "ARG", "PTH", "PL"]` (o la selección que use el monorepo raíz).
+    - `ignore = []` inicial (ajustar según necesidad).
+    - `line-length = 120` (o la que use el monorepo).
+    - Configurar `[lint.per-file-ignores]` para `tests/` si se requiere (`"D"`-related, etc.).
+    - Verificar con `uv run ruff check .` desde `contexts/matching/`.
 
 ---
 
