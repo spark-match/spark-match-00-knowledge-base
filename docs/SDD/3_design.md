@@ -1722,7 +1722,8 @@ class FeatureEngineer:
             with open(self.config_path, "r") as f:
                 return json.load(f)
         return {
-            "duration_years_fallback": 4.0,
+            "duration_years_fallback_instituto": 4.0,
+            "duration_years_fallback_universidad": 5.0,
             "monthly_income_fallback": 2500.0,
             "annual_cost_fallback": 1000.0,
             "admission_rate_fallback": 30.0
@@ -1751,23 +1752,52 @@ class FeatureEngineer:
         return self.df
     
     def hierarchical_imputation(self) -> pd.DataFrame:
-        """Imputación en cascada (familia → fallback)."""
+        """Imputación en cascada (3 niveles: family+management → family → fallback).
+        
+        Para duración el fallback depende del tipo de institución:
+        - Instituto: `duration_years_fallback_instituto` (default 4.0)
+        - Universidad: `duration_years_fallback_universidad` (default 5.0)
+        """
         for col in ["duration_years", "monthly_income", "annual_cost", "admission_rate"]:
-            # Nivel 1: mediana por family
+            # Nivel 1: mediana por (career_family, management_type)
+            group_medians = self.df.groupby(["career_family", "management_type"])[col].median()
+            
+            # Nivel 2: mediana por career_family (si grupo no tiene datos)
             family_medians = self.df.groupby("career_family")[col].median()
             
-            # Nivel 2: fallback desde config
-            fallback = self.config[f"{col}_fallback"]
+            # Nivel 3: fallback desde config (con especialización para duración)
+            if col == "duration_years":
+                def duration_fallback(row):
+                    key = "duration_years_fallback_instituto" if row.get("institution_type") == "Instituto" else "duration_years_fallback_universidad"
+                    return self.config.get(key, 5.0)
+                global_fallback = self.df.apply(duration_fallback, axis=1)
+            else:
+                global_fallback = self.config.get(f"{col}_fallback")
             
+            # Aplicar imputación jerárquica
             self.df[f"{col}_imputed"] = self.df[col].fillna(
-                self.df["career_family"].map(family_medians).fillna(fallback)
+                self.df.set_index(["career_family", "management_type"]).index.map(
+                    lambda x: group_medians.get(x, None)
+                ).fillna(
+                    self.df["career_family"].map(family_medians)
+                )
             )
+            
+            # Si aún hay NaN (familia sin mediana), aplicar fallback
+            nan_mask = self.df[f"{col}_imputed"].isna()
+            if col == "duration_years":
+                self.df.loc[nan_mask, f"{col}_imputed"] = global_fallback[nan_mask]
+            else:
+                self.df.loc[nan_mask, f"{col}_imputed"] = global_fallback
         
         return self.df
     
     def validate_ranges(self) -> pd.DataFrame:
-        """Valida y ajusta rangos."""
-        self.df["duration_years_imputed"] = self.df["duration_years_imputed"].clip(3, 7)
+        """Valida y ajusta rangos tras imputación.
+        
+        NOTA: duration_years_imputed no tiene clamp final. La imputación
+        jerárquica + fallback por tipo de institución es suficiente.
+        """
         self.df["admission_rate_imputed"] = self.df["admission_rate_imputed"].clip(0, 90)
         return self.df
     
