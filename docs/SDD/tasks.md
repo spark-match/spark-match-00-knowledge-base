@@ -17,8 +17,8 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
       uv add --dev "pytest>=7.0.0" "pytest-asyncio>=0.21.0" "pytest-cov>=4.1.0"
       ```
     - `uv sync` genera `uv.lock` automáticamente.
-  - [ ] 1.3 Crear `.env.example` con variables de entorno: `AWS_REGION=us-east-1`, `LLM_PROVIDER=bedrock`, `LLM_MODEL=anthropic.claude-3-5-sonnet-20241022`, `EMBEDDING_PROVIDER=bedrock`, `EMBEDDING_MODEL=amazon.titan-embed-text-v2`, `AURORA_ENDPOINT=...`, `AURORA_PORT=5432`, `AURORA_USER=postgres`, `AURORA_PASSWORD=...`, `AURORA_DATABASE=careermatch`, `DYNAMODB_TABLE_UNIVERSITIES=universities`, `SESSION_TIMEOUT_MINUTES=480`, `LOG_LEVEL=INFO`, `ENVIRONMENT=development`.
-    - NOTA: `JWT_SECRET`, `JWT_ALGORITHM` ya no son requeridas para MVP (se usa `session_id` anónimo). Si se implementa JWT (tarea 16.O opcional), agregarlas.
+  - [ ] 1.3 Crear `.env.example` con variables de entorno: `AWS_REGION=us-east-1`, `LLM_PROVIDER=bedrock`, `LLM_MODEL=anthropic.claude-3-5-sonnet-20241022`, `EMBEDDING_PROVIDER=bedrock`, `EMBEDDING_MODEL=amazon.titan-embed-text-v2`, `AURORA_ENDPOINT=...`, `AURORA_PORT=5432`, `AURORA_USER=postgres`, `AURORA_PASSWORD=...`, `AURORA_DATABASE=careermatch`, `DYNAMODB_TABLE_UNIVERSITIES=universities`, `SESSION_TIMEOUT_MINUTES=480`, `LOG_LEVEL=INFO`, `ENVIRONMENT=development`, `JWT_SECRET=...`, `JWT_ALGORITHM=HS256`.
+    - NOTA: `JWT_SECRET` y `JWT_ALGORITHM` son obligatorios y deben coincidir con los que usa Identity Context (Secrets Manager compartido, no un secreto propio del servicio de scoring/chat).
   - [ ] 1.4 Crear `pytest.ini` con configuración: `testpaths = tests`, `python_files = test_*.py`, `asyncio_mode = auto`, `addopts = --tb=short -v`, markers para `unit`, `integration`, `property`. Configurar `.coveragerc` con `source = backend, data_pipeline`, umbrales mínimos 60%.
   - [ ] 1.5 Crear `README.md` inicial con: descripción del proyecto, instrucciones de instalación (`uv sync`), guía de variables de entorno, estructura de directorios, fases de desarrollo, y comandos para ejecutar tests (`uv run pytest tests/ --cov`).
   - [ ] 1.6 Crear `Dockerfile` para servicio Fargate: imagen `python:3.10-slim`, instalar `uv` vía `COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/`, instalar dependencias de sistema (`gcc`, `postgresql-client`), copiar `pyproject.toml` y `uv.lock`, ejecutar `uv sync --no-dev`, exponer puerto 8000, healthcheck para `/health`, entrypoint `uv run uvicorn backend.app:app --host 0.0.0.0 --port 8000`.
@@ -588,11 +588,12 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - Si válido: retorna `session_id`.
     - Loguea auditoría: `"Session validated: {session_id}"`.
     _Requerimientos: 8.3_
-  - [ ] (Opcional) 16.O Auth con JWT:
-    - Implementar método `create_jwt_session()` que genera JWT firmado con `JWT_SECRET` y algoritmo `JWT_ALGORITHM`.
-    - Requiere variables `JWT_SECRET`, `JWT_ALGORITHM` en `.env`.
-    - `validate_token` decodifica JWT en lugar de lookup en diccionario.
-    - Tests: token válido, expirado, firma incorrecta, revocación.
+  - [ ] 16.O Auth con JWT (consumir Identity Context existente):
+    - Eliminar la implementación de `AuthService` con `session_id` anónimo en memoria. Reemplazar por consumo del Identity Context existente (TypeScript/Lambda).
+    - El backend FastAPI no genera JWT por sí mismo; delega en `POST /v1/auth/login` y `POST /v1/auth/register` del Identity Context.
+    - `validate_token` decodifica JWT usando `PyJWT.decode()` con el secreto compartido desde Secrets Manager (el mismo que usa Identity Context).
+    - Si el Identity Context no está disponible en startup, el servicio no arranca (dependencia obligatoria).
+    - Tests: login con credenciales válidas → JWT válido; token expirado; firma incorrecta; revocación.
     - NOTA: Google OAuth puede integrarse como extensión futura si se requiere identidad de usuario.
   - [ ] 16.4 Tests: `test_auth_service.py`:
     - Verifica `create_session()` retorna session_id y session_token no nulos.
@@ -600,13 +601,12 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - Verifica expiración por TTL: token expirado retorna None.
     - Verifica token inválido (uuid inexistente) retorna None.
 
-- [ ] (Pospuesto — producción) 17. Implementar `backend/lambda/feedback_handler.py` — Lambda Feedback Handler
-  - NOTA: Para la demo, `/feedback` se sirve desde el mismo FastAPI (app.py). Este handler Lambda es necesario solo si se separa en API Gateway + Lambda para producción.
-  - [ ] (Opcional) 17.1 Implementar `session_handler.lambda_handler(event, context)`:
-    - Handler para API Gateway `POST /session/create`.
-    - Invoca `auth_service.create_session()`.
-    - Retorna `{statusCode: 200, body: json.dumps({session_id, session_token})}`.
-    - NOTA: Solo necesario si se separa en Lambda la creación de sesión. Para MVP con sesión anónima, la creación se hace inline en `app.py` startup (ver tarea 11.5).
+- [ ] 17. Integrar sesión vía Identity Context
+  - [ ] 17.1 Consumir Identity Context para creación y validación de sesión:
+    - El backend FastAPI obtiene el JWT llamando a `POST /v1/auth/login` del Identity Context existente.
+    - En cada request `/chat`, el JWT se valida con `PyJWT.decode()` usando el secreto compartido desde Secrets Manager.
+    - El endpoint `/session/create` propio ya no existe; el login/register se delega al Identity Context.
+    - Si el Identity Context no responde, el servicio retorna error 503 (dependencia crítica).
     _Requerimientos: 8.1_
   - [ ] (Pospuesto — producción) 17.2 Implementar `feedback_handler.lambda_handler(event, context)`:
     - Evento API Gateway: `{httpMethod: "POST", path: "/feedback", body: json_string}`.
@@ -635,10 +635,11 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - Al generar ranking: invoca `feedback_storage.save_ranking(session_id, ranking_json, metadata)`.
     - Guarda `ranking_id` en contexto y retorna en respuesta JSON (para futura validación).
     _Requerimientos: 9.1_
-  - [ ] (Opcional) 18.O Integrar JWT como alternativa:
-    - Modificar `app.py` para usar `auth_service.create_jwt_session()` si `JWT_SECRET` está definido.
-    - `validate_token` decodifica JWT en lugar de lookup en diccionario.
-    - Tests de integración JWT: `/session/create` → obtiene JWT → `/chat` con JWT → ranking.
+  - [ ] 18.O Integrar JWT como mecanismo único de autenticación:
+    - Eliminar la opción de `session_id` anónimo. El backend FastAPI solo acepta JWT válidos del Identity Context.
+    - `validate_token` decodifica JWT usando `PyJWT.decode()` con el secreto compartido.
+    - El frontend obtiene el JWT llamando a `POST /v1/auth/login` del Identity Context.
+    - Tests de integración JWT: login con credenciales válidas → obtiene JWT → `/chat` con JWT → ranking.
   - [ ] 18.3 Tests de integración: `test_auth_persistence_integration.py`:
     - Flujo: `auth_service.create_session()` → obtiene session_id.
     - `/chat` con token (session_id) válido → genera ranking → persiste en Aurora.
@@ -954,7 +955,7 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
 
 - **Sesión conversacional**: Vive **en memoria dentro del proceso Fargate** con TTL simple (1800s), decisión explícita para demo. NO introduce Redis ni DynamoDB para sesiones.
 
-- **Autenticación simplificada (2.2)**: Para el MVP se usa `session_id` anónimo (UUID v4) como token, sin JWT ni Lambda para creación de sesión. JWT queda como alternativa opcional (tarea 16.O) para cuando se necesite autenticación stateless entre Lambda y Fargate. La autenticación JWT y el handler Lambda `/session/create` quedan como tareas opcionales (16.O, 17.1, 18.O) para cuando se requiera identidad de usuario. Google OAuth es una extensión futura posible. El backend existente de Angel (con Identity completo) deberá reconciliarse antes de adoptar JWT en producción — ver `OBSERVACIONES_tasks.md` § Alineación de stack.
+- **Autenticación JWT (2.2)**: Todo turno de `/chat` requiere un JWT válido emitido por el Identity Context existente (TypeScript/Lambda con endpoints `register`/`login`/`users/me`). No existe `session_id` anónimo. El backend FastAPI valida el JWT con `PyJWT.decode()` usando el secreto compartido desde Secrets Manager. El Identity Context es una dependencia obligatoria del sistema; sin él, el servicio de scoring/chat no puede operar. Google OAuth es una extensión futura posible.
 
 - **Un solo servicio para la demo (2.3)**: Todos los endpoints (`/chat`, `/feedback`, `/universities`) se sirven desde el mismo FastAPI. La arquitectura Lambda + Fargate + API Gateway (diagrama en design.md § 2.1) es la **meta de producción** (ver ADR-001). Las tareas de infraestructura Lambda (13.3, 17, 19.2) y handlers Lambda están marcadas como `(Pospuesto — producción)` y quedan fuera del alcance de la demo. La migración se evalúa post-demo si la carga lo justifica.
 
