@@ -327,7 +327,7 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
     - Verifica fallback templado cuando Bedrock falla 3 veces.
     - Verifica que `generate_follow_up` no repite información del historial.
 
-- [ ] 9. Implementar `backend/session.py` — SessionManager
+- [ ] 9. Implementar `backend/session.py` — SessionManager (solo desarrollo local)
   - [ ] 9.1 Implementar clase `SessionManager`:
     - Constructor: inicializa `self._sessions: dict[str, SessionContext]` vacío.
   - [ ] 9.2 Implementar método `create_context(self, session_id: str) -> SessionContext`:
@@ -355,7 +355,7 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
     - Verifica que `update_context` hace merge sin perder campos previos.
     - Verifica que campos None no sobreescriben valores previos.
 
-- [ ] 10. Implementar `backend/orchestration.py` — Orchestration_Layer
+- [ ] 10. Implementar `backend/lambda/matching_handler.py` — ScoringEngine como Lambda Reactivo
   - [ ] 10.1 Implementar función `calculate_confidence(profile: StudentProfile) -> float`:
     - Cuenta campos completos:
       - `riasec_completos = 1` si los 6 keys en `riasec_scores` están presentes y todos != None, `0` si no.
@@ -364,116 +364,151 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
     - Clamp a `[0, 1]`.
     - Retorna float.
     _Requerimientos: 4.1_
-  - [ ] 10.2 Implementar clase `Orchestration`:
-    - Constructor: inyecta `auth_service`, `session_manager`, `llm_service`, `scoring_engine`, `rag_module` (None si no disponible), `feedback_storage`.
-    - Almacena referencias a estos servicios.
-  - [ ] 10.3 Implementar método `handle_turn(self, session_id: str, message: str) -> dict`:
-    - Paso 1: Recupera contexto vía `session_manager.get_context(session_id)`. Si no existe, crea uno nuevo.
-    - Paso 2: Agrega `message` al `conversation_history` con rol 'user', timestamp.
-    - Paso 3: Determina bloque activo:
-      - Si `riasec_scores` incompleto: Bloque A.
-      - Elif pesos no priorizados (todos None): Bloque B.
-      - Elif filtros no definidos: Bloque C.
-      - Else: proceder a ranking.
-    - Paso 4: Interpreta bloque activo vía `llm_service.interpret_bloque_*()`.
-    - Paso 5: Actualiza contexto vía `session_manager.update_context()` con datos interpretados.
-    - Paso 6: Recalcula `profile.confidence_score = calculate_confidence(profile)`.
-    - Paso 7: Evalúa avance:
-      - Si `confidence >= 0.70` O `turn_count >= 4`: proceder a ranking (paso 8).
-      - Si no: generar pregunta seguimiento (paso 10).
-    - Paso 8: RANKING:
-      - Incrementa `turn_count`.
-      - Marca `dialogue_state = 'ready_for_recommendation'`.
-      - Si `turn_count >= 4`: loguea `{"graceful_degradation": true}` (información incompleta pero procede).
-      - Invoca `scoring_engine.rank_and_filter(profile, features_df)` → lista completa.
-      - Trunca a Top-5 vía `ranked_list[:5]`.
-      - Para cada item: invoca `llm_service.generate_explanation(item, profile)` → agrega `item['explicacion']`.
-      - Persiste en `feedback_storage.save_ranking()` (Fase 3 integra esto).
-      - Retorna `{"status": "success", "ranking": {"status": "ready", "top_5": items}, "bot_message": "Aquí están mis 5 mejores recomendaciones...", "requires_follow_up": false}`.
-    - Paso 9: REPREGUNTA:
-      - Incrementa `turn_count`.
-      - Identifica `missing_info = [campos null en profile]`.
-      - Invoca `llm_service.generate_follow_up(profile, missing_info, history)`.
-      - Agrega bot_message al `conversation_history`.
-      - Retorna `{"status": "success", "ranking": {"status": "awaiting_info"}, "bot_message": str_pregunta, "requires_follow_up": true}`.
+  - [ ] 10.2 Definir schema del evento `AssessmentCompleted`:
+    - Crear dataclass `AssessmentCompletedEvent`:
+      ```python
+      @dataclass
+      class AssessmentCompletedEvent:
+          userId: str
+          sessionId: str
+          riasec_scores: dict[str, int]  # {"R": 8, "I": 9, ...}
+          weights: dict[str, float]       # {"w_afinidad": 0.3, ...}
+          filters: dict                   # {"location": "Lima", "management_type": "publica", ...}
+          confidence: float               # [0, 1]
+          timestamp: str                  # ISO 8601
+      ```
+    - El evento llega desde EventBridge con `detail-type: "AssessmentCompleted"`.
+    - Implementar parser que extrae `detail` del evento y construye `AssessmentCompletedEvent`.
+    _Requerimientos: 8.2_
+  - [ ] 10.3 Implementar handler `matching_handler.lambda_handler(event, context)`:
+    - Firma estándar Lambda: `def lambda_handler(event: dict, context: object) -> dict`.
+    - Paso 1: Validar que `event["detail-type"] == "AssessmentCompleted"`. Si no: retorna `{"status": "ignored"}`.
+    - Paso 2: Parsear `event["detail"]` → `AssessmentCompletedEvent` (reusa 10.2).
+    - Paso 3: Cargar `features.csv` desde S3 (o path local en desarrollo).
+    - Paso 4: Crear `StudentProfile` desde los campos del evento:
+      - `riasec_scores` desde `event.riasec_scores`
+      - Pesos desde `event.weights`
+      - Filtros desde `event.filters`
+    - Paso 5: Calcular `riasec_code = calculate_riasec_code(profile.riasec_scores)`.
+    - Paso 6: Invocar `scoring_engine.rank_and_filter(profile, features_df)`.
+    - Paso 7: Extraer Top-5: `top_5 = scoring_engine.get_top_n(ranked, 5)`.
+    - Paso 8: Generar `ranking_id = str(uuid.uuid4())`.
+    - Paso 9: Persistir ranking en Aurora PostgreSQL (tabla `rankings`).
+    - Paso 10: Emitir `RecommendationGenerated` a EventBridge:
+      ```python
+      client = boto3.client("events")
+      client.put_events(Entries=[{
+          "Source": "careermatch.matching",
+          "DetailType": "RecommendationGenerated",
+          "Detail": json.dumps({
+              "userId": event.userId,
+              "sessionId": event.sessionId,
+              "rankingId": ranking_id,
+              "top_5": top_5,
+              "snapshot_id": os.getenv("SNAPSHOT_ID", "latest"),
+              "timestamp": datetime.utcnow().isoformat()
+          }),
+          "EventBusName": os.getenv("EVENT_BUS_NAME", "spark-match-events")
+      }])
+      ```
+    - Paso 11: Retornar `{"statusCode": 200, "body": json.dumps({"rankingId": ranking_id})}`.
     - Manejo de errores:
-      - Si `llm_service` falla (3 intentos): loguea, continúa con fallback.
-      - Si `scoring_engine.rank_and_filter` falla (FileNotFoundError): retorna HTTP 500.
-      - Si `scoring_engine` retorna lista vacía (filtros eliminan todo): retorna error amigable.
-    _Requerimientos: 1.1, 2.1, 3.1, 4.1, 4.2, 4.3_
-  - [ ] 10.4 Tests: `test_orchestrator.py`:
-    - Simula conversación de 2 turnos: Turno 1 (riasec parcial) → Turno 2 (pesos) → confidence >= 0.70 → ranking.
-    - Simula conversación de 4 turnos SIN completar información → fuerza ranking en turno 4 con `graceful_degradation=true`.
-    - Verifica que `conversation_history` se va llenando correctamente.
-  - [ ] 10.5 Tests basados en propiedades: **Propiedad 5 — Confidence Monótono**. **Valida: Requerimiento 4 criterio 4.1**. Estrategia:
-    - Generar secuencias aleatorias de actualizaciones: `profile` comienza vacío → agrega riasec → agrega pesos → agrega filtros.
+      - Si `features.csv` no disponible: loguea, retorna `{"statusCode": 500}`.
+      - Si Aurora caído: queue local + reintento.
+      - Si parse inválido: loguea, retorna `{"statusCode": 400}`.
+    - Timeout Lambda: 30 segundos (suficiente para 6,208 combinaciones).
+    _Requerimientos: 1.1, 2.1, 3.1, 4.1, 4.2, 4.3, 8.2_
+  - [ ] 10.4 Definir schema del evento `RecommendationGenerated`:
+    - Crear dataclass `RecommendationGeneratedEvent`:
+      ```python
+      @dataclass
+      class RecommendationGeneratedEvent:
+          userId: str
+          sessionId: str
+          rankingId: str
+          top_5: list[dict]  # Lista de RankingItem serializados
+          snapshot_id: str
+          timestamp: str
+      ```
+    - Este evento es consumido por el AI Advisor para generar explicaciones.
+    _Requerimientos: 8.2_
+  - [ ] 10.5 Implementar `backend/lambda/feedback_handler.py` — Feedback Lambda Handler:
+    - Firma: `def lambda_handler(event: dict, context: object) -> dict`.
+    - Activado por API Gateway v2 (ruta `POST /feedback`).
+    - Paso 1: Extraer JWT de `event["headers"]["Authorization"]`.
+    - Paso 2: Validar JWT con `PyJWT.decode(jwt, secret, algorithms=["HS256"])` → `userId`.
+      - Si inválido: retorna `{"statusCode": 401, "body": "Unauthorized"}`.
+    - Paso 3: Parsear body: `{rankingId, validationScore, selectedCareer, notes}`.
+    - Paso 4: Validar `validationScore ∈ [1, 5]`: si no, `{"statusCode": 422}`.
+    - Paso 5: Verificar que `rankingId` pertenece a `userId` (security).
+    - Paso 6: Persistir feedback en Aurora (tabla `feedback`).
+    - Paso 7: Retornar `{"statusCode": 200, "body": json.dumps({"status": "success"})}`.
+    _Requerimientos: 8.1, 9.1_
+  - [ ] 10.6 Tests: `test_matching_handler.py`:
+    - Mockea evento EventBridge con `AssessmentCompleted` válido.
+    - Mockea `ScoringEngine`, `boto3.client("events")` y Aurora.
+    - Verifica que el handler parsea el evento, ejecuta scoring y emite `RecommendationGenerated`.
+    - Verifica error handling: evento con `detail-type` incorrecto → `status="ignored"`.
+    - Verifica error handling: `features.csv` no disponible → `statusCode=500`.
+  - [ ] 10.7 Tests: `test_feedback_handler.py`:
+    - Mockea API Gateway event con JWT válido.
+    - Mockea `PyJWT.decode` y Aurora.
+    - Verifica validación: score fuera de rango → 422.
+    - Verifica validación: JWT inválido → 401.
+    - Verifica flujo exitoso → 200 con `{"status": "success"}`.
+  - [ ] 10.8 Tests basados en propiedades: **Propiedad 5 — Confidence Monótono**. **Valida: Requerimiento 4 criterio 4.1**. Estrategia:
+    - Generar secuencias aleatorias de actualizaciones: `profile` comienza vacío → agrega riasec → agrega pesos.
     - Invariante: `confidence_score` nunca disminuye.
     - Verificar con `hypothesis`: generar 100 secuencias aleatorias.
 
 - [ ] 11. Implementar `backend/app.py` — FastAPI Entrypoint (desarrollo local Matching Context)
   - [ ] 11.1 Implementar fixture de FastAPI:
-    - `app = FastAPI(title="CareerMatch Perú Agent API")`.
-    - Variable global `orchestration = None` (inicializada en startup).
-    - Función para extraer token: `get_session_token(request: Request) -> str` desde header `Authorization: Bearer {token}` o query param `session_token`.
-  - [ ] 11.2 Implementar endpoint `POST /chat`:
-    - Recibe JSON: `{message: str, metadata: dict | None}`.
-    - Header requerido: `Authorization: Bearer {token}`.
-    - Valida token vía `auth_service.validate_token()` (Fase 3; ahora: stub que retorna session_id).
-    - Invoca `orchestration.handle_turn(session_id, message, metadata)`.
-    - Retorna JSON response (status, ranking, bot_message, etc.).
-    - HTTP 401 si token inválido.
+    - `app = FastAPI(title="CareerMatch Perú — Matching Context (local dev)")`.
+    - Variable global `scoring_engine = None` (inicializada en startup).
+    - NOTA: Este entrypoint es solo para desarrollo local. En producción, los handlers son Lambdas individuales.
+  - [ ] 11.2 Implementar endpoint `POST /v1/matching/score`:
+    - Recibe JSON: `{riasec_scores: dict, weights: dict, filters: dict, userId: str}`.
+    - Construye `StudentProfile` desde el request.
+    - Invoca `scoring_engine.rank_and_filter(profile, features_df)`.
+    - Retorna `{status: "success", top_5: list[RankingItem]}`.
     - HTTP 500 si error interno (loguea sin PII).
+    - NOTA: Este endpoint simula localmente lo que el Lambda `matching_handler` hace en producción.
     _Requerimientos: 8.2_
-  - [ ] 11.3 Implementar endpoint `POST /feedback`:
-    - Recibe JSON: `{ranking_id: str, validation_score: int [1,5], selected_career: str | None, notes: str | None}`.
-    - Valida `validation_score ∈ [1, 5]`: si no, HTTP 422.
-    - Invoca `feedback_storage.update_validation()` (Fase 3; ahora: stub).
-    - Retorna `{status: "success", message: "..."}`.
-    _Requerimientos: 8.1, 9.1_
-  - [ ] 11.4 Implementar endpoint `POST /rag` (stub para Fase 4):
-    - Recibe JSON: `{career: str, question: str}`.
-    - Retorna `{status: "no_documents", answer: "", sources: []}` (no implementado aún).
-  - [ ] 11.5 Implementar event handler `@app.on_event("startup")`:
-    - Inicializa componentes:
-      - `auth_service = AuthService()` (stub).
-      - `session_manager = SessionManager()`.
-      - `llm_service = LLMService(provider=os.getenv("LLM_PROVIDER"), model=os.getenv("LLM_MODEL"))`.
-      - `scoring_engine = ScoringEngine("data/features.csv", "data/feature_config.json")`.
-      - `feedback_storage = FeedbackStorage(db_url=os.getenv("AURORA_ENDPOINT"))` (stub).
-      - `rag_module = None` (implementar en Fase 4).
-      - `orchestration = Orchestration(...)` (inyecta dependencias).
-    - Loguea "Application initialized".
-  - [ ] 11.6 Implementar endpoint `GET /health`:
+  - [ ] 11.3 Implementar endpoint `GET /health`:
     - Retorna `{status: "ok"}`.
     - Usado para health check del servicio local.
-  - [ ] 11.7 Tests de integración: `test_app_chat_flow.py`:
+  - [ ] 11.4 Implementar event handler `@app.on_event("startup")`:
+    - Inicializa componentes:
+      - `scoring_engine = ScoringEngine("data/features.csv", "data/feature_config.json")`.
+    - Loguea "Matching Context local iniciado correctamente".
+  - [ ] 11.5 Tests de integración: `test_app_score_flow.py`:
     - Usa `TestClient` de FastAPI.
     - Fixture: cargar `tests/fixtures/features_50_careers.csv` (50 carreras, 10 con RIASEC semilla).
-    - Simula `/chat` request: `{message: "Me gustan matemáticas"}`.
-    - Verifica response JSON structure.
-    - Simula secuencia de 2+ mensajes hasta obtener ranking.
-    - Verifica Top-5 retornado, scores en `[0,1]`, explicaciones presentes.
+    - Simula `POST /v1/matching/score` con perfil completo.
+    - Verifica response: `status: "success"`, `top_5` con 5 items.
+    - Verifica scores en `[0,1]`, ranks 1–5.
 
-- [ ] 12. Checkpoint Fase 2 — Validación de Flujo Conversacional
+- [ ] 12. Checkpoint Fase 2 — Validación de Scoring Local (Matching Context)
   - [ ] 12.1 Levantar servicio: `docker-compose up -d` (backend + postgres local).
-  - [ ] 12.2 Ejecutar conversación completa vía curl/httpie:
+  - [ ] 12.2 Ejecutar scoring local vía curl:
     ```bash
-    curl -X POST http://localhost:8000/chat \
-      -H "Authorization: Bearer token_xyz" \
+    curl -X POST http://localhost:8000/v1/matching/score \
       -H "Content-Type: application/json" \
-      -d '{"message": "Me interesan matemáticas y análisis de datos"}'
+      -d '{
+        "riasec_scores": {"R": 8, "I": 9, "A": 7, "S": 6, "E": 5, "C": 4},
+        "weights": {"w_afinidad": 0.3, "w_ingreso": 0.25, "w_costo": 0.2, "w_admision": 0.15, "w_duracion": 0.1},
+        "filters": {"location": null, "management_type": null, "presupuesto_max": null, "modalidad": null},
+        "userId": "test-user"
+      }'
     ```
-    - Mensaje 1: respuesta con pregunta (requires_follow_up=true).
-    - Mensaje 2: respuesta con pregunta.
-    - Mensaje 3 (o antes): respuesta con Top-5 ranking (status=ready).
+    - Respuesta esperada: `{"status": "success", "top_5": [...]}`.
   - [ ] 12.3 Verificar que Top-5 tiene:
     - 5 items, ranks 1–5.
     - `concordancia_score` en `[0,1]`.
     - `scores_by_criterion` con 5 criterios.
     - `datos_verificables` con claves `monthly_income_imputed`, `annual_cost_imputed`, `admission_rate_imputed`, `duration_years_imputed`.
-    - `explicacion` non-empty.
   - [ ] 12.4 Ejecutar suite: `uv run pytest tests/test_*.py tests/integration/ --cov`.
-    - Cobertura ≥ 60% en `backend/llm_service.py`, `backend/session.py`, `backend/orchestration.py`, `backend/app.py`.
+    - Cobertura ≥ 60% en `backend/scoring.py`, `backend/lambda/matching_handler.py`, `backend/app.py`.
     - Todos los tests de propiedades (1, 5, 6) deben pasar.
 
 ---
@@ -524,11 +559,11 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
     ```sql
     CREATE TABLE feedback (
         id BIGSERIAL PRIMARY KEY,
-        session_id UUID NOT NULL,
-        career_id TEXT NOT NULL,
-        validation_score SMALLINT CHECK (validation_score BETWEEN 1 AND 5),
-        created_at TIMESTAMPTZ DEFAULT now(),
-        INDEX idx_session ON feedback(session_id)
+    user_id TEXT NOT NULL,
+    career_id TEXT NOT NULL,
+    validation_score SMALLINT CHECK (validation_score BETWEEN 1 AND 5),
+    created_at TIMESTAMPTZ DEFAULT now(),
+    INDEX idx_user ON feedback(user_id)
     );
     ```
     _Requerimientos: 9.1, 10.2_
@@ -536,11 +571,11 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
     ```sql
     CREATE TABLE rankings (
         id BIGSERIAL PRIMARY KEY,
-        session_id UUID NOT NULL,
-        ranking_json JSONB NOT NULL,
-        reproducibility_metadata JSONB,
-        created_at TIMESTAMPTZ DEFAULT now(),
-        INDEX idx_session ON rankings(session_id)
+    user_id TEXT NOT NULL,
+    ranking_json JSONB NOT NULL,
+    reproducibility_metadata JSONB,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    INDEX idx_user ON rankings(user_id)
     );
     ```
     _Requerimientos: 9.1, 10.2_
@@ -549,20 +584,20 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
   - [ ] 15.1 Implementar clase `FeedbackStorage`:
     - Constructor: inicializa conexión PostgreSQL vía `psycopg2.connect(dsn=AURORA_CONN_STRING)`.
     - Valida conexión; si falla: loguea `ERROR` y almacena fallbacks en queue local (in-memory).
-  - [ ] 15.2 Implementar método `save_ranking(self, session_id: str, ranking_json: dict, metadata: dict) -> str`:
+  - [ ] 15.2 Implementar método `save_ranking(self, user_id: str, ranking_json: dict, metadata: dict) -> str`:
     - Serializa `ranking_json` y `metadata` a JSON strings.
-    - Inserta en tabla `rankings`: `INSERT INTO rankings (session_id, ranking_json, reproducibility_metadata, created_at) VALUES (...)`.
+    - Inserta en tabla `rankings`: `INSERT INTO rankings (user_id, ranking_json, reproducibility_metadata, created_at) VALUES (...)`.
     - Genera y retorna `ranking_id` (uuid4).
     - Si DB no disponible: almacena en queue local, loguea warning, retorna provisional ranking_id.
     _Requerimientos: 9.1_
-  - [ ] 15.3 Implementar método `save_feedback(self, session_id: str, ranking_id: str, validation_score: int, selected_career: str | None, notes: str | None) -> None`:
+  - [ ] 15.3 Implementar método `save_feedback(self, user_id: str, ranking_id: str, validation_score: int, selected_career: str | None, notes: str | None) -> None`:
     - Valida `validation_score ∈ [1, 5]`: si no, lanza `ValueError`.
-    - Inserta en tabla `feedback`: `INSERT INTO feedback (session_id, career_id, validation_score, created_at) VALUES (...)` (or updateranking_json si es update).
+    - Inserta en tabla `feedback`: `INSERT INTO feedback (user_id, career_id, validation_score, created_at) VALUES (...)` (or updateranking_json si es update).
     - Si DB no disponible: queue local.
     _Requerimientos: 9.1_
-  - [ ] 15.4 Implementar método `get_feedback_by_session(self, session_id: str) -> list[dict]`:
-    - Consulta: `SELECT * FROM feedback WHERE session_id = %s`.
-    - Filtra siempre por `session_id` (aislamiento garantizado).
+  - [ ] 15.4 Implementar método `get_feedback_by_user(self, user_id: str) -> list[dict]`:
+    - Consulta: `SELECT * FROM feedback WHERE user_id = %s`.
+    - Filtra siempre por `user_id` (aislamiento garantizado por JWT sub).
     - Retorna lista de registros.
     _Requerimientos: 10.2_
   - [ ] 15.5 Implementar método `sync_queue_to_db(self)`:
@@ -576,79 +611,69 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
     - Verifica que `get_feedback_by_session` no retorna registros de otra sesión.
     - Verifica que DB error dispara fallback queue local.
 
-- [ ] 16. Implementar `backend/auth.py` — Auth_Service (session_id anónimo, JWT opcional)
-  - [ ] 16.1 Implementar clase `AuthService`:
-    - Constructor: `self.timeout_minutes = int(os.getenv("SESSION_TIMEOUT_MINUTES", 480))`.
-    - Almacena sesiones activas en dict en-memoria: `self._active_sessions = {}`.
-  - [ ] 16.2 Implementar método `create_session(self) -> dict`:
-    - Genera `session_id = str(uuid.uuid4())`.
-    - Almacena en `self._active_sessions[session_id] = {"created_at": time.time()}`.
-    - Retorna `{"session_id": session_id, "session_token": session_id}` (token = propio session_id).
-    - NOTA: Para MVP el token es el mismo session_id (UUID v4). Si se requiere JWT en futuro, ver tarea 16.O.
+- [ ] 16. Implementar `backend/auth.py` — Auth Service (JWT desde Identity Context)
+  - [ ] 16.1 Implementar función `validate_jwt(token: str) -> dict | None`:
+    - Decodifica JWT usando `PyJWT.decode(token, secret, algorithms=["HS256"])`.
+    - `secret` se obtiene desde AWS Secrets Manager (compartido con Identity Context).
+    - Si válido: retorna payload decodificado (contiene `sub` = userId, `exp`, etc.).
+    - Si expirado (`ExpiredSignatureError`): retorna None.
+    - Si firma incorrecta (`InvalidSignatureError`): retorna None.
+    - Si cualquier otro error: loguea warning, retorna None.
+    - Loguea auditoría: `"JWT validated: userId={sub}"`.
     _Requerimientos: 8.3_
-  - [ ] 16.3 Implementar método `validate_token(self, session_token: str) -> str | None`:
-    - Verifica que `session_token` existe en `self._active_sessions`.
-    - Verifica TTL: si expirado, elimina y retorna None.
-    - Si válido: retorna `session_id`.
-    - Loguea auditoría: `"Session validated: {session_id}"`.
+  - [ ] 16.2 Implementar clase `JWTValidator`:
+    - Constructor: lee `JWT_SECRET` desde Secrets Manager (SSM Parameter `JWT_SECRET`).
+    - Almacena en `self.secret` y `self.algorithm = os.getenv("JWT_ALGORITHM", "HS256")`.
+    - Método `validate(self, token: str) -> dict | None`: envuelve `validate_jwt()`.
+    - NOTA: El Matching Context NO emite JWT — solo valida. La emisión es responsabilidad del Identity Context (TypeScript/Lambda, endpoints `/v1/auth/login` y `/v1/auth/register`).
+    - Si el secreto no está disponible en startup (Secrets Manager inaccesible), el servicio no arranca (dependencia obligatoria).
     _Requerimientos: 8.3_
-  - [ ] 16.O Auth con JWT (consumir Identity Context existente):
-    - Eliminar la implementación de `AuthService` con `session_id` anónimo en memoria. Reemplazar por consumo del Identity Context existente (TypeScript/Lambda).
-    - El backend FastAPI no genera JWT por sí mismo; delega en `POST /v1/auth/login` y `POST /v1/auth/register` del Identity Context.
-    - `validate_token` decodifica JWT usando `PyJWT.decode()` con el secreto compartido desde Secrets Manager (el mismo que usa Identity Context).
-    - Si el Identity Context no está disponible en startup, el servicio no arranca (dependencia obligatoria).
-    - Tests: login con credenciales válidas → JWT válido; token expirado; firma incorrecta; revocación.
+  - [ ] 16.3 Tests: `test_auth_service.py`:
+    - Mockea `PyJWT.decode` con token válido → retorna payload con `sub: "user-123"`.
+    - Mockea `PyJWT.decode` con `ExpiredSignatureError` → retorna None.
+    - Mockea `PyJWT.decode` con `InvalidSignatureError` → retorna None.
+    - Verifica que `validate_jwt` loguea auditoría en caso exitoso.
     - NOTA: Google OAuth puede integrarse como extensión futura si se requiere identidad de usuario.
-  - [ ] 16.4 Tests: `test_auth_service.py`:
-    - Verifica `create_session()` retorna session_id y session_token no nulos.
-    - Verifica `validate_token()` con token válido retorna session_id correcto.
-    - Verifica expiración por TTL: token expirado retorna None.
-    - Verifica token inválido (uuid inexistente) retorna None.
 
-- [ ] 17. Integrar sesión vía Identity Context
-  - [ ] 17.1 Consumir Identity Context para creación y validación de sesión:
-    - El backend FastAPI obtiene el JWT llamando a `POST /v1/auth/login` del Identity Context existente.
-    - En cada request `/chat`, el JWT se valida con `PyJWT.decode()` usando el secreto compartido desde Secrets Manager.
-    - El endpoint `/session/create` propio ya no existe; el login/register se delega al Identity Context.
-    - Si el Identity Context no responde, el servicio retorna error 503 (dependencia crítica).
-    _Requerimientos: 8.1_
-  - [ ] (Pospuesto — producción) 17.2 Implementar `feedback_handler.lambda_handler(event, context)`:
-    - Evento API Gateway: `{httpMethod: "POST", path: "/feedback", body: json_string}`.
-    - Parsea body: `{ranking_id, validation_score, selected_career, notes}`.
-    - Valida `validation_score ∈ [1, 5]`: si no, retorna `{statusCode: 422, body: "..."}`.
-    - Extrae `session_id` desde JWT en header (valida vía `auth_service.validate_token`).
-    - Invoca `feedback_storage.save_feedback(...)`.
-    - Retorna `{statusCode: 200, body: json.dumps({status: "success"})}`.
-    - NOTA: Para la demo, la validación y persistencia de feedback se hace directamente en `app.py` endpoint `/feedback`, sin Lambda.
+- [ ] 17. Integrar validación JWT desde Identity Context
+  - [ ] 17.1 Implementar validación JWT en Lambda handlers:
+    - En cada Lambda handler (`matching_handler`, `feedback_handler`), el JWT llega en el header `Authorization`.
+    - Extraer token: `event["headers"]["Authorization"].removeprefix("Bearer ")`.
+    - Validar con `JWTValidator.validate(token)`.
+    - Si inválido: retornar `{"statusCode": 401, "body": "Unauthorized"}` inmediatamente.
+    - Si válido: extraer `userId` de `payload["sub"]`.
+    - NOTA: El endpoint `/v1/auth/login` y `/v1/auth/register` viven en el Identity Context (TypeScript/Lambda). El Matching Context solo consume/valida JWT; no emite ni gestiona sesiones.
+    _Requerimientos: 8.1, 8.3_
+  - [ ] 17.2 Implementar `feedback_handler.lambda_handler(event, context)` (ya cubierto en 10.5):
+    - Activado por API Gateway v2 (ruta `POST /feedback`).
+    - Valida JWT → extrae `userId`.
+    - Parsea body → persiste feedback en Aurora.
+    - Retorna 200/401/422 según corresponda.
     _Requerimientos: 8.1, 9.1_
-  - [ ] (Pospuesto — producción) 17.3 Tests: `test_lambda_handlers.py`:
-    - Mockea eventos API Gateway.
-    - Verifica `/session/create` retorna token válido.
-    - Verifica `/feedback` rechaza score fuera de rango (422).
-    - Verifica `/feedback` rechaza token inválido (401).
+  - [ ] 17.3 Tests: `test_lambda_handlers.py`:
+    - Mockea eventos API Gateway con JWT válido e inválido.
+    - Verifica `/feedback` con JWT válido → 200.
+    - Verifica `/feedback` con JWT inválido → 401.
+    - Verifica `/feedback` con score fuera de rango → 422.
 
-- [ ] 18. Integrar Sesión Anónima en `/chat` Endpoint
-  - [ ] 18.1 Modificar `backend/app.py` endpoint `POST /chat`:
-    - Extrae token del header `Authorization: Bearer {token}`.
-    - Invoca `auth_service.validate_token(token)` → obtiene `session_id`.
-    - Si token inválido: retorna HTTP 401.
-    - Invoca `orchestration.handle_turn(session_id, message, metadata)` (como antes).
-    - NOTA: Para MVP el token es el propio `session_id` (UUID v4), no JWT. La validación es lookup en diccionario en-memoria.
+- [ ] 18. Integrar JWT como mecanismo único de autenticación en Lambdas
+  - [ ] 18.1 Integrar `JWTValidator` en `matching_handler`:
+    - El `matching_handler` es invocado por EventBridge (no por API Gateway), por lo que NO recibe JWT en el evento.
+    - El `AssessmentCompleted` ya contiene `userId` validado por Assessment Context.
+    - Se confía en el `userId` del evento (Assessment Context ya validó JWT antes de emitir).
+    - Validar que `event["detail"]["userId"]` no sea nulo o vacío.
     _Requerimientos: 8.3_
-  - [ ] 18.2 Modificar `backend/orchestration.py` método `handle_turn`:
-    - Al generar ranking: invoca `feedback_storage.save_ranking(session_id, ranking_json, metadata)`.
-    - Guarda `ranking_id` en contexto y retorna en respuesta JSON (para futura validación).
-    _Requerimientos: 9.1_
-  - [ ] 18.O Integrar JWT como mecanismo único de autenticación:
-    - Eliminar la opción de `session_id` anónimo. El backend FastAPI solo acepta JWT válidos del Identity Context.
-    - `validate_token` decodifica JWT usando `PyJWT.decode()` con el secreto compartido.
-    - El frontend obtiene el JWT llamando a `POST /v1/auth/login` del Identity Context.
-    - Tests de integración JWT: login con credenciales válidas → obtiene JWT → `/chat` con JWT → ranking.
+  - [ ] 18.2 Integrar `JWTValidator` en `feedback_handler`:
+    - El `feedback_handler` es invocado por API Gateway, recibe JWT en header `Authorization`.
+    - Extraer token, validar, extraer `userId`.
+    - Verificar que el `rankingId` del body pertenece al `userId` del token (security: no validar feedback de otro usuario).
+    - Si `userId` no coincide: retorna 403.
+    _Requerimientos: 8.3, 9.1_
   - [ ] 18.3 Tests de integración: `test_auth_persistence_integration.py`:
-    - Flujo: `auth_service.create_session()` → obtiene session_id.
-    - `/chat` con token (session_id) válido → genera ranking → persiste en Aurora.
-    - `/feedback` con ranking_id → guarda validación.
-    - Verifica datos persistidos en Aurora.
+    - Flujo: mockear `JWTValidator.validate()` → retorna payload con `userId`.
+    - Simular evento `AssessmentCompleted` → `matching_handler` genera ranking.
+    - Simular `POST /feedback` con JWT válido → persiste validación.
+    - Verifica datos persistidos en Aurora (mockeado).
 
 - [ ] 19. Implementar Georreferencia — DynamoDB Universities
   - [ ] 19.1 Crear tabla DynamoDB `universities` (vía AWS Console o Terraform):
@@ -671,21 +696,20 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
     - Verifica listado completo retorna 3 items.
     - Verifica filtrado por location retorna 2 items (Lima).
 
-- [ ] 20. Checkpoint Fase 3 — Validación de Backend Híbrido e Integración
+- [ ] 20. Checkpoint Fase 3 — Validación de Matching Context con Persistencia
   - [ ] 20.1 Ejecutar flujo completo contra recursos mockeados:
     - Postgres local (docker-compose) en lugar de Aurora.
     - DynamoDB mockeado con `moto`.
-    - `auth_service.create_session()` → obtiene session_id anónimo (UUID v4).
-    - `/chat` con session_id → conversa 2–4 turnos → ranking generado.
-    - `/feedback` con ranking_id y score válido → persistido en Postgres.
-    - `/universities` → retorna lista, filtrado por location.
-  - [ ] 20.2 Verificar aislamiento por `session_id`:
-    - Crear 2 sesiones distintas.
-    - Session A: feedback sobre carrera X.
-    - Session B: consultar feedback → no ve datos de Session A.
+    - Simular evento `AssessmentCompleted` con perfil completo → invoca `matching_handler.lambda_handler()`.
+    - Verificar que emite `RecommendationGenerated` (mockear EventBridge).
+    - Simular `POST /feedback` con JWT mockeado → persistido en Postgres.
+    - Consultar `/universities` → retorna lista, filtrado por location.
+  - [ ] 20.2 Verificar aislamiento por `userId`:
+    - Simular 2 eventos con distintos `userId`.
+    - Feedback del usuario A → consultar feedback del usuario A → solo ve sus datos.
+    - Feedbacks de ambos usuarios en DB pero query filtrado por `userId`.
   - [ ] 20.3 Ejecutar suite: `uv run pytest tests/ --cov`.
-    - Cobertura ≥ 60% en `backend/persistence/`, `backend/auth.py`.
-    - NOTA: `backend/lambda/` queda fuera de cobertura para la demo (postpuesto a producción).
+    - Cobertura ≥ 60% en `backend/persistence/`, `backend/auth.py`, `backend/lambda/`.
     - Propiedades de corrección (3 — Aislamiento, 4 — Reproducibilidad) deben pasar.
 
 ---
@@ -763,14 +787,14 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
     - Verifica `query()` con carrera sin RAG retorna `status="no_documents"`.
     - Verifica embedding failure → `status="error"`.
 
-- [ ] 23. Integrar RAGModule en Orchestrator (Opcional para MVP)
-  - [ ] 23.1 Modificar `backend/orchestration.py` método `handle_turn()`:
-    - Después de generar ranking: detecta si usuario pregunta detalles sobre una carrera del Top-5.
-    - Si sí: invoca `rag_module.query(career, question)`.
-    - Agrega respuesta RAG al `bot_message` o retorna campo separado `rag_response`.
-    - Si RAG no disponible (module=None) o carrera sin RAG: continúa sin error (graceful degradation).
+- [ ] 23. Integrar RAG en AI Advisor (fuera de alcance de Matching Context)
+  - [ ] (Opcional — pospuesto) 23.1 El RAG query se integra en el AI Advisor (repo `08-deep-agent`), no en el Matching Context:
+    - AI Advisor recibe el ranking desde `RecommendationGenerated`.
+    - Si el usuario pregunta detalles sobre una carrera del Top-5, AI Advisor invoca RAG contra Aurora (pgvector).
+    - Matching Context no expone endpoint RAG — eso es responsabilidad del AI Advisor.
+    - Si RAG no disponible: AI Advisor retorna respuesta sin información adicional (graceful degradation).
     _Requerimientos: 10.3_
-  - [ ] 23.2 Tests: `test_orchestrator_rag_integration.py`:
+  - [ ] (Opcional — pospuesto) 23.2 Tests: `test_rag_integration.py` (en repo AI Advisor):
     - Simula pregunta de detalle sobre carrera del Top-5 con RAG disponible.
     - Verifica que respuesta incluye información de RAG.
     - Simula con RAG fallando: verifica que flujo continúa sin error.
@@ -824,20 +848,15 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
     - Setup: Carga fixtures en `data/`.
     - Genera `features.csv` vía `run_full_pipeline()`.
     - Crea `ScoringEngine` con fixtures.
-    - Simula 4 turnos de conversación:
-      - Turno 1: usuario menciona intereses.
-      - Turno 2: usuario prioriza criterios.
-      - Turno 3–4: usuario especifica filtros.
-    - Genera ranking.
-    - Persiste en Aurora (test DB).
-    - Consulta `/universities` filtrado.
+    - Simula un evento `AssessmentCompleted` con perfil completo (riasec_scores, weights, filters).
+    - Invoca `matching_handler.lambda_handler(event, context)`.
+    - Verifica que emite `RecommendationGenerated` (mockear `boto3.client("events")`).
     - Verifica:
       - Top-5 generado correctamente.
-      - Aislamiento por `session_id`.
-      - Datos persistidos en Aurora.
-      - Datos recuperables desde Aurora.
-    - Módulos implicados: `data_pipeline`, `backend/llm_service`, `backend/scoring`, `backend/orchestration`, `backend/persistence`, `backend/lambda`.
-    _Requerimientos: 5.4, 7.1, 7.2, 7.3, 8.1, 8.2, 8.3, 9.1, 10.2_
+      - Aislamiento por `userId` (event tiene userId).
+      - Datos persistidos en Aurora (mockeado).
+    - Módulos implicados: `data_pipeline`, `backend/scoring`, `backend/lambda/matching_handler`, `backend/persistence`.
+    _Requerimientos: 5.4, 8.1, 8.2, 8.3, 9.1, 10.2_
 
 - [ ] 27. Validación de Restricciones No Funcionales
   - [ ] 27.1 Tests basados en propiedades: **Propiedad 4 — Reproducibilidad**. **Valida: Requerimiento 9 criterio 9.1**. Estrategia:
@@ -880,8 +899,8 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
     - Estructura de directorios.
   - [ ] 28.2 Documentar política de logging seguro en `README.md`:
     - NUNCA loguear: tokens completos, API keys (AWS), claves JWT, credenciales DB, PII de usuarios (nombres reales completos).
-    - SÍ loguear: `session_id`, timestamps, nombres de carreras (públicos), scores, pesos, eventos de flujo.
-    - Ejemplo: `"Ranking generated: session_id={session_id}, career_count=5, confidence_score=0.85"`.
+    - SÍ loguear: `user_id`, timestamps, nombres de carreras (públicos), scores, pesos, eventos de flujo.
+    - Ejemplo: `"Ranking generated: user_id={user_id}, career_count=5, confidence_score=0.85"`.
     - Configuración centralizada en `backend/utils.py` (función `setup_logging()`).
     _Requerimientos: 10.4_
   - [ ] 28.3 Crear `docs/ARCHITECTURE.md`:
@@ -915,24 +934,24 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
     - **Propiedad 6 — Pesos Válidos**: test en `test_llm_weights_validity.py` ✓.
   - [ ] 29.3 Ejecutar test de integración end-to-end (`test_integration_full_flow.py`):
     - Fixture de 50 carreras.
-    - Conversa completa (4 turnos) → ranking → persistencia → consulta.
-    - Aislamiento verificado.
-    - Todos los módulos integrados y funcionando.
+    - Simular evento `AssessmentCompleted` → `matching_handler` genera ranking → emite `RecommendationGenerated`.
+    - Aislamiento por `userId` verificado.
+    - Todos los módulos del Matching Context integrados y funcionando.
   - [ ] 29.4 Ejecutar benchmark de performance (`test_scoring_performance.py`):
     - 6,208 carreras → score ≤ 1 segundo ✓.
   - [ ] 29.5 Verificar README, docs, y estructura de proyecto:
     - `README.md` actualizado con instrucciones claras.
-    - `docs/ARCHITECTURE.md` documenta decisiones.
-    - `docs/DEPLOYMENT.md` lista pasos de deploy.
+    - `docs/ARCHITECTURE.md` documenta decisiones (incluyendo EDA).
+    - `docs/DEPLOYMENT.md` lista pasos de deploy (consumir infra existente).
     - `.env.example` con todas las variables necesarias.
     - `pyproject.toml` y `uv.lock` actualizados.
-    - `Dockerfile` y `docker-compose.yml` funcionales.
+    - `Dockerfile` y `docker-compose.yml` funcionales (solo desarrollo local).
     - Todos los archivos en sus ubicaciones correctas.
   - [ ] 29.6 Documento de seguimiento:
     - Generar reporte de cobertura: `coverage html`, revisar `htmlcov/index.html`.
     - Listar todos los requerimientos cubiertos (R1–R10, C1–C7).
     - Documentar cualquier desviación o trabajo pendiente.
-    - Firmar off como "Fase 5 completa — Sistema listo para demo".
+    - Firmar off como "Fase 5 completa — Matching Context listo para integración con otros contextos".
 
 ---
 
@@ -957,9 +976,11 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
   - Embeddings: ÚNICAMENTE Bedrock Titan (NO sentence-transformers local, NO OpenAI).
   - Vector DB: ÚNICAMENTE pgvector en Aurora (NO FAISS local, NO Pinecone, NO Chroma).
 
-- **Sesión conversacional**: La sesión conversacional vive en el AI Advisor (repo `08-deep-agent`), no en el Matching Context. Para Matching Context, el JWT del Identity Context se valida en cada invocación Lambda. NO hay estado de sesión en memoria en este contexto.
+- **Sesión conversacional**: La sesión conversacional vive en el AI Advisor (repo `08-deep-agent`), no en el Matching Context. Para Matching Context, el JWT del Identity Context se valida en cada invocación Lambda. El Matching Context NO tiene estado de sesión en memoria — toda la información llega en el evento `AssessmentCompleted`.
 
-- **Autenticación JWT (2.2)**: Todo turno de `/chat` requiere un JWT válido emitido por el Identity Context existente (TypeScript/Lambda con endpoints `register`/`login`/`users/me`). No existe `session_id` anónimo. El backend FastAPI valida el JWT con `PyJWT.decode()` usando el secreto compartido desde Secrets Manager. El Identity Context es una dependencia obligatoria del sistema; sin él, el servicio de scoring/chat no puede operar. Google OAuth es una extensión futura posible.
+- **Autenticación JWT (2.2)**: El JWT es emitido por el Identity Context (TypeScript/Lambda con endpoints `register`/`login`/`users/me`). No existe `session_id` anónimo. El Matching Context valida JWT con `PyJWT.decode()` usando el secreto compartido desde Secrets Manager. El Identity Context es una dependencia obligatoria del sistema; sin él, ni los Lambdas ni los servicios locales pueden operar. Google OAuth es una extensión futura posible.
+
+- **Coreografía de eventos**: No existe clase `Orchestration` monolítica. La coordinación entre contextos es vía eventos EventBridge: Assessment emite `AssessmentCompleted`, Matching consume y emite `RecommendationGenerated`, AI Advisor consume. Cada contexto es autónomo y reacciona a eventos de forma asíncrona.
 
 - **Matching Context es solo una pieza (2.3)**: Este plan cubre únicamente Matching Context (scoring determinístico Python 3.12 Lambda) + Data Pipeline. Identity, Assessment, Career y AI Advisor se implementan en otros repositorios. El `Dockerfile`/`docker-compose.yml` son solo para desarrollo local del Matching Context, no para el backend completo.
 
