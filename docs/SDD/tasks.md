@@ -4,7 +4,7 @@
 
 **Alcance de este documento: solo Matching Context (scoring determinístico en Python 3.12 Lambda) + Data Pipeline.** Los contextos Identity, Assessment, Career y AI Advisor se implementan en otros repositorios/stacks (ver `design.md` § 2.2). Este plan NO cubre el backend completo.
 
-La implementación avanza en cinco fases incrementales sobre AWS, cada una dejando el Matching Context en un estado funcional e integrado: primero se construye el pipeline de datos (`data_loading` desde snapshot existente, `data_clean`, `feature_engineering`) y el `ScoringEngine` determinístico como fundación aislada sin dependencias externas; luego se implementa el flujo de scoring con fixtures locales en FastAPI (solo desarrollo local); después se agregan persistencia (Aurora PostgreSQL) y georreferencia (DynamoDB); luego capacidades secundarias opcionales (RAG con pgvector, embeddings Bedrock Titan); y finalmente se cierra con etiquetado RIASEC a escala completa (554 carreras únicas vía Bedrock batch + join a las 6,208 filas), tests de integración con fixtures reales, validación de propiedades de corrección y documentación final. Cada fase termina con un checkpoint explícito que verifica progreso integrado e inspecciona antes de continuar.
+La implementación avanza en cinco fases incrementales sobre AWS, cada una dejando el Matching Context en un estado funcional e integrado: primero se define el schema `CareerOffering` en Aurora (schema `career.career_offerings`, el aggregate carrera×universidad con métricas) y se construye el pipeline de datos que lo puebla (`data_loading` desde snapshot existente, `data_clean`, `feature_engineering`, escritura batch a Aurora). Luego se implementa el `ScoringEngine` determinístico leyendo desde Aurora; después se agregan persistencia de feedback (Aurora PostgreSQL) y capacidades secundarias opcionales (RAG con pgvector, embeddings Bedrock Titan). Finalmente se cierra con etiquetado RIASEC a escala completa (554 carreras únicas vía Bedrock batch + join a las 6,208 filas), tests de integración con fixtures reales, validación de propiedades de corrección y documentación final. Cada fase termina con un checkpoint explícito que verifica progreso integrado e inspecciona antes de continuar.
 
 ## Tareas
 
@@ -19,7 +19,7 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
       uv add --dev "pytest>=7.0.0" "pytest-asyncio>=0.21.0" "pytest-cov>=4.1.0"
       ```
     - `uv sync` genera `uv.lock` automáticamente.
-  - [ ] 1.3 Crear `.env.example` con variables de entorno: `AWS_REGION=us-east-1`, `LLM_PROVIDER=bedrock`, `LLM_MODEL=anthropic.claude-3-5-sonnet-20241022`, `EMBEDDING_PROVIDER=bedrock`, `EMBEDDING_MODEL=amazon.titan-embed-text-v2`, `AURORA_ENDPOINT=...`, `AURORA_PORT=5432`, `AURORA_USER=postgres`, `AURORA_PASSWORD=...`, `AURORA_DATABASE=careermatch`, `DYNAMODB_TABLE_UNIVERSITIES=universities`, `SESSION_TIMEOUT_MINUTES=480`, `LOG_LEVEL=INFO`, `ENVIRONMENT=development`, `JWT_SECRET=...`, `JWT_ALGORITHM=HS256`.
+  - [ ] 1.3 Crear `.env.example` con variables de entorno: `AWS_REGION=us-east-1`, `LLM_PROVIDER=bedrock`, `LLM_MODEL=anthropic.claude-3-5-sonnet-20241022`, `EMBEDDING_PROVIDER=bedrock`, `EMBEDDING_MODEL=amazon.titan-embed-text-v2`, `AURORA_ENDPOINT=...`, `AURORA_PORT=5432`, `AURORA_USER=postgres`, `AURORA_PASSWORD=...`, `AURORA_DATABASE=careermatch`, `SCHEMA_NAME=career`, `LOG_LEVEL=INFO`, `ENVIRONMENT=development`, `JWT_SECRET=...`, `JWT_ALGORITHM=HS256`.
     - NOTA: `JWT_SECRET` y `JWT_ALGORITHM` son obligatorios y deben coincidir con los que usa Identity Context (Secrets Manager compartido, no un secreto propio del servicio de scoring/chat).
   - [ ] 1.4 Crear `pytest.ini` con configuración: `testpaths = tests`, `python_files = test_*.py`, `asyncio_mode = auto`, `addopts = --tb=short -v`, markers para `unit`, `integration`, `property`. Configurar `.coveragerc` con `source = backend, data_pipeline`, umbrales mínimos 60%.
   - [ ] 1.5 Crear `README.md` inicial con: descripción del proyecto, instrucciones de instalación (`uv sync`), guía de variables de entorno, estructura de directorios, fases de desarrollo, y comandos para ejecutar tests (`uv run pytest tests/ --cov`).
@@ -102,7 +102,7 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
 
 - [ ] 4. Implementar `data_pipeline/riasec_tagging.py` — Etiquetado RIASEC (Bedrock + Validación Muestral)
   - [ ] 4.1 Implementar función `tag_careers_with_bedrock(catalog_unique: pd.DataFrame, seed_examples: pd.DataFrame) -> pd.DataFrame`:
-    - El tagging opera sobre **carreras únicas** (554 distinct `career`), NO sobre las 6.208 filas de features.csv.
+    - El tagging opera sobre **carreras únicas** (554 distinct `career`), NO sobre las 6.208 filas de `career.career_offerings`.
     - Input `catalog_unique`: DataFrame deduplicado por `career` (1 fila por carrera única), con columnas `id, career, career_family, description`.
     - Inicializa cliente `boto3.client('bedrock-runtime', region_name=AWS_REGION)`.
     - Para cada carrera SIN `riasec_profile`:
@@ -145,8 +145,8 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
   - [ ] 5.1 Implementar dataclass `StudentProfile`:
     - Bloque A: `riasec_scores: dict[str, int]` (valores [1,10]), `riasec_code: str | None` (3 letras o None).
     - Bloque B: `w_afinidad: float`, `w_ingreso: float`, `w_costo: float`, `w_admision: float`, `w_duracion: float` (todos [0,1]).
-    - Bloque C: `location: str | None` (región/ubicación del estudiante, se mapea a columna `location` en features.csv), `management_type: str | None` ('Pública' | 'Privada', se mapea a columna `management_type` en CSV), `presupuesto_max: float | None`, `modalidad: str | None`.
-    - NOTA: `institution_type` (Universidad/Instituto) es una columna separada en features.csv y NO es el filtro management_type del Figma.
+    - Bloque C: `location: str | None` (región/ubicación del estudiante, se mapea a columna `location` en `career.career_offerings`), `management_type: str | None` ('Pública' | 'Privada', se mapea a columna `management_type` en carrera), `presupuesto_max: float | None`, `modalidad: str | None`.
+    - NOTA: `institution_type` (Universidad/Instituto) es una columna separada en `career.career_offerings` y NO es el filtro management_type del Figma.
     - Contexto: `interests: list[str]`, `strengths: list[str]`, `preferred_fields: list[str]`, `dislikes: list[str]`.
     - Estado: `confidence_score: float` ([0,1]), `confidence_reasoning: str`.
     - Defaults: si Bloque B no se prioriza, cada peso = 0.2; si usuario dice "no me importa X", peso = 0 (re-normalizar después).
@@ -171,6 +171,57 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
     - Valores válidos: verifica que se crean sin error.
     - Valores inválidos (ej riasec_score=0 o 11): verifica `ValueError`.
     - Verifica defaults (pesos=0.2, ttl_seconds=1800).
+
+- [ ] 5.6 Definir schema `CareerOffering` en Aurora:
+    - Crear archivo `infra/schema_career_offerings.sql` con DDL del aggregate:
+      ```sql
+      CREATE SCHEMA IF NOT EXISTS career;
+
+      CREATE TABLE career.career_offerings (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          career_id TEXT NOT NULL,
+          career TEXT NOT NULL,
+          institution TEXT NOT NULL,
+          career_family TEXT,
+          riasec_profile VARCHAR(3),
+          riasec_source VARCHAR(20),
+          monthly_income DECIMAL(10,2),
+          annual_cost DECIMAL(10,2),
+          admission_rate DECIMAL(5,2),
+          duration_years DECIMAL(3,1),
+          monthly_income_imputed DECIMAL(10,2),
+          annual_cost_imputed DECIMAL(10,2),
+          admission_rate_imputed DECIMAL(5,2),
+          duration_years_imputed DECIMAL(3,1),
+          income_norm DECIMAL(5,4),
+          cost_norm DECIMAL(5,4),
+          admission_norm DECIMAL(5,4),
+          duration_norm DECIMAL(5,4),
+          location TEXT,
+          management_type TEXT,
+          institution_type TEXT,
+          modalidad TEXT,
+          income_imputed_flag BOOLEAN DEFAULT FALSE,
+          cost_imputed_flag BOOLEAN DEFAULT FALSE,
+          admission_imputed_flag BOOLEAN DEFAULT FALSE,
+          duration_imputed_flag BOOLEAN DEFAULT FALSE,
+          snapshot_id TEXT,
+          version INTEGER DEFAULT 1,
+          created_at TIMESTAMPTZ DEFAULT now(),
+          updated_at TIMESTAMPTZ DEFAULT now(),
+          INDEX idx_career ON career_offerings(career),
+          INDEX idx_institution ON career_offerings(institution),
+          INDEX idx_location ON career_offerings(location)
+      );
+      ```
+    - Este schema es propiedad de Career Context. Matching Context tiene acceso de LECTURA.
+    - NOTA: El pipeline batch (data_pipeline) escribe aquí directamente (INSERT/UPDATE batch).
+    _Requerimientos: 6.1_
+  - [ ] 5.7 Crear migración inicial del schema:
+    - Script SQL ejecutable: `infra/migrations/V001__create_career_offerings.sql`.
+    - Debe ser idempotente: `CREATE SCHEMA IF NOT EXISTS`, `CREATE TABLE IF NOT EXISTS`.
+    - Incluir en la configuración de infraestructura (ejecutar contra Aurora antes del deploy).
+    _Requerimientos: 6.1_
 
 - [ ] 6. Implementar `backend/scoring.py` — ScoringEngine (Determinístico)
   - [ ] 6.1 Implementar función `calculate_riasec_code(riasec_scores: dict[str, int]) -> str`:
@@ -216,10 +267,21 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
     - Retorna float.
     _Requerimientos: 5.1_
   - [ ] 6.6 Implementar clase `ScoringEngine`:
-    - Constructor: carga `features.csv` en DataFrame, carga `feature_config.json`.
+    - Constructor: recibe `db_connection_string: str` (URI Aurora) y `config_json_path: str`.
+    - Conecta a Aurora PostgreSQL vía `psycopg2.connect(dsn=db_connection_string)`.
+    - Consulta schema `career`, tabla `career_offerings`:
+      ```sql
+      SELECT id, career, institution, riasec_profile, location,
+             management_type, income_norm, cost_norm, admission_norm,
+             duration_norm, monthly_income_imputed, annual_cost_imputed,
+             admission_rate_imputed, duration_years_imputed
+      FROM career.career_offerings
+      ```
+    - Lee resultado en Pandas DataFrame con `pd.read_sql()`.
     - Valida schema: debe tener columnas `id, career, institution, riasec_profile, income_norm, cost_norm, admission_norm, duration_norm, location, management_type, monthly_income_imputed, annual_cost_imputed, admission_rate_imputed, duration_years_imputed`.
-    - Si archivo no existe: raise `FileNotFoundError`.
-    - Si schema incorrecto: raise `ValueError`.
+    - Si la tabla no existe o está vacía: raise `ValueError("career_offerings vacía o no existe")`.
+    - Fallback desarrollo local: si `AURORA_ENDPOINT` no está configurado, carga `features.csv` local.
+    _Requerimientos: 6.1_
   - [ ] 6.7 Implementar método `rank_and_filter(self, profile: StudentProfile, features_df: pd.DataFrame) -> list[RankingItem]`:
     - Paso 1: Calcula `riasec_code` desde `profile.riasec_scores`.
     - Paso 2: Aplica filtros duros (ignorar los con valor None, que significa "me da igual"):
@@ -255,9 +317,9 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
   - [ ] 7.1 Ejecutar suite `uv run pytest data_pipeline/ tests/test_scoring.py --cov` con fixture reducido (50 carreras, 10 semilla RIASEC).
     - Verificar que `DataLoader.load()` retorna path válido desde snapshot existente (o fallback si no hay snapshots).
     - Verificar que `DataCleaner.clean()` retorna DataFrame válido sin filas incompletas.
-    - Verificar que `FeatureEngineer.run_pipeline()` genera `features.csv` con columnas `income_norm`, `cost_norm`, `admission_norm`, `duration_norm` en `[0,1]`.
+    - Verificar que `FeatureEngineer.run_pipeline()` genera DataFrame con columnas `income_norm`, `cost_norm`, `admission_norm`, `duration_norm` en `[0,1]` (listo para escribir en Aurora).
     - Verificar que `tag_careers_with_bedrock` opera sobre carreras únicas (mockeado) y el join subsiguiente propaga correctamente `riasec_profile` a features_df.
-    - Verificar que `ScoringEngine.rank_and_filter()` produce Top-5 con scores en `[0,1]`, determinístico, desempatado correctamente.
+    - Verificar que `ScoringEngine.rank_and_filter()` (cargando desde Aurora o fallback CSV) produce Top-5 con scores en `[0,1]`, determinístico, desempatado correctamente.
     - Cobertura mínima 60% en `data_pipeline` y `backend/scoring.py`.
     - Ejecutar test de determinismo (Propiedad 1) y pesos válidos (Propiedad 6): ambos deben pasar.
 
@@ -265,52 +327,16 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
 
 ## Fase 2 — Flujo de Scoring Local (Alta): Matching Context sobre Fixtures, sin Persistencia Real
 
-- [ ] 8. Implementar `backend/llm_service.py` — LLM_Layer (Amazon Bedrock Claude)
-  - [ ] 8.1 Implementar clase `LLMService`:
-    - Constructor: `__init__(self, provider: str = "bedrock", model: str = "anthropic.claude-3-5-sonnet-20241022", region: str = "us-east-1")`.
-    - Inicializa `self.client = boto3.client('bedrock-runtime', region_name=region)`.
-    - Almacena `self.model_id = model`.
-    - Loguea inicialización.
-    _Requerimientos: 7.1_
-  - [ ] 8.2 Implementar método `interpret_bloque_a(self, message: str, history: list[dict]) -> dict`:
-    - Construye system prompt con mínimo 3 ejemplos few-shot de perfiles RIASEC.
-    - Prompt incluye: mensaje usuario actual, histórico conversacional (últimos 3 turnos).
-    - Invoca Bedrock: `self.client.invoke_model(modelId=self.model_id, body=json.dumps({...}))`.
-    - Parsea respuesta: espera JSON `{"riasec_scores": {"R": int, ...}, "missing_letters": [str], "confidence": float}`.
-    - Si JSON válido: retorna dict con `riasec_scores`, `missing_letters`.
-    - Si JSON inválido: reintenta máximo 3 veces.
-    - Si falla tras 3 intentos: retorna `{"error": "fallback_templated", "missing_letters": ["R", "I", "A", "S", "E", "C"]}` (plantilla genérica).
-    - Loguea cada intento.
-    - Timeout máximo 5s; si excede: loguea `TimeoutError`, retorna fallback.
-    _Requerimientos: 1.1, 7.1_
-  - [ ] 8.3 Implementar método `interpret_bloque_b(self, message: str, history: list[dict]) -> dict`:
-    - System prompt detecciona si usuario da orden explícita de prioridades o ajustes de pesos.
-    - Retorna JSON: `{"priority_order": list[str] | None, "explicit_weights": dict | None, "confidence": float}`.
-    - `priority_order` es permutación de 5 criterios si usuario prioriza claramente.
-    - `explicit_weights` es dict si usuario dice "pesos explícitos" (raro en demo).
-    - Si ambos None: usuario aún no prioriza claramente.
-    - Idem manejo de fallos y timeouts que Bloque A.
-    _Requerimientos: 2.1, 7.1_
-  - [ ] 8.4 Implementar método `interpret_bloque_c(self, message: str, history: list[dict]) -> dict`:
-    - Detecta menciones de región (normaliza: "Lima" → "Lima", "arequipa" → "Arequipa"), tipo institución, presupuesto, modalidad.
-    - Retorna JSON: `{"location": str | None, "management_type": "publica" | "privada" | None, "presupuesto_max": float | None, "modalidad": "presencial" | "virtual" | None, "confidence": float}`.
-    - NOTA: el LLM devuelve estos nombres de campo; el Orchestration mapea a StudentProfile.location y StudentProfile.management_type directamente.
-    - Si usuario dice "me da igual" o no menciona: valor = None.
-    - Manejo de fallos y timeouts idem Bloques A/B.
-    _Requerimientos: 3.1, 3.2, 7.1_
-  - [ ] 8.5 Implementar método `_parse_and_validate_json(self, raw_response: str) -> dict`:
-    - Intenta `json.loads(raw_response)`.
-    - Si `JSONDecodeError`: reintenta máximo 3 veces.
-    - Si falla tras 3 intentos: retorna `{"error": "fallback_templated"}` (señal para usar plantilla).
-    - Loguea cada intento fallido como warning.
-    _Requerimientos: 7.2_
-  - [ ] 8.6 Implementar método `generate_follow_up(self, profile: StudentProfile, missing_info: list[str], history: list[dict]) -> str`:
-    - Construye pregunta abierta basada en `missing_info` (ej si falta `w_ingreso`: pregunta sobre prioridad de ingresos).
-    - Verifica que no repite lo ya mencionado en `history` (filtra últimos 5 turnos).
-    - Responde vía Bedrock con few-shot de preguntas naturales.
-    - Si LLM falla: retorna plantilla genérica por tipo de información faltante (ej "¿Hay algo más que quieras que considere?").
-    - Retorna string en español peruano, conversacional.
-    _Requerimientos: 7.2, 7.3_
+> ❄️ **Tareas 8.x y 10.1 congeladas:** La tarea 8 (LLM_Layer con `interpret_bloque_a/b/c`, `generate_follow_up`) y la tarea 10.1 (`calculate_confidence`) asumen captura conversacional de Bloques A/B/C vía LLM. El Assessment Context real es un **cuestionario estructurado** (`POST /v1/assessments`, `POST /v1/assessments/{id}/responses`). Estas tareas quedan **congeladas** hasta la decisión de producto (Opción A: eliminar, Opción B: coexistencia con mapeo campo→campo). Ver `design.md` §1 y §3 para detalle. La tarea 8.7 (`generate_explanation`) sigue vigente para el AI Advisor.
+
+- [ ] ❄️ 8. Implementar `backend/llm_service.py` — LLM_Layer (Amazon Bedrock Claude) [CONGELADA]
+  - [ ] ❄️ 8.1 Implementar clase `LLMService` [CONGELADA]:
+    - (Congelada — ver nota de fase)
+  - [ ] ❄️ 8.2 Implementar método `interpret_bloque_a` [CONGELADA]
+  - [ ] ❄️ 8.3 Implementar método `interpret_bloque_b` [CONGELADA]
+  - [ ] ❄️ 8.4 Implementar método `interpret_bloque_c` [CONGELADA]
+  - [ ] ❄️ 8.5 Implementar método `_parse_and_validate_json` [CONGELADA]
+  - [ ] ❄️ 8.6 Implementar método `generate_follow_up` [CONGELADA]
   - [ ] 8.7 Implementar método `generate_explanation(self, ranking_item: RankingItem, profile: StudentProfile) -> str`:
     - Construye prompt: ranking_item (career, institution, scores, datos verificables), profile (interests, pesos).
     - Invoca Bedrock con few-shot de explicaciones reales.
@@ -321,11 +347,7 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
     - Si LLM falla: retorna plantilla fallback: "Recomendamos [carrera] en [universidad] porque alinea bien con tus intereses ([criterios]). Datos: ingresos S/. [X]/mes, costo S/. [Y]/año, admisión [Z]%."
     - Nunca inventa datos; todos vienen de `ranking_item.datos_verificables`.
     _Requerimientos: 7.3_
-  - [ ] 8.8 Tests: `test_llm_service.py`:
-    - Mockea cliente Bedrock: respuesta válida, respuesta inválida x3 (JSON malformado), timeout simulado.
-    - Verifica `interpret_bloque_a` con mensaje de ejemplo: extrae correctamente `riasec_scores`.
-    - Verifica fallback templado cuando Bedrock falla 3 veces.
-    - Verifica que `generate_follow_up` no repite información del historial.
+  - [ ] ❄️ 8.8 Tests: `test_llm_service.py` [CONGELADA]
 
 - [ ] 9. Implementar `backend/session.py` — SessionManager (solo desarrollo local)
   - [ ] 9.1 Implementar clase `SessionManager`:
@@ -356,14 +378,9 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
     - Verifica que campos None no sobreescriben valores previos.
 
 - [ ] 10. Implementar `backend/lambda/matching_handler.py` — ScoringEngine como Lambda Reactivo
-  - [ ] 10.1 Implementar función `calculate_confidence(profile: StudentProfile) -> float`:
-    - Cuenta campos completos:
-      - `riasec_completos = 1` si los 6 keys en `riasec_scores` están presentes y todos != None, `0` si no.
-      - `pesos_completos = count({w_afinidad, w_ingreso, w_costo, w_admision, w_duracion} != None)` (máx 5).
-    - Fórmula: `confidence = (riasec_completos * 6 + pesos_completos) / 11.0`.
-    - Clamp a `[0, 1]`.
-    - Retorna float.
-    _Requerimientos: 4.1_
+  - [ ] ❄️ 10.1 Implementar función `calculate_confidence(profile: StudentProfile) -> float` [CONGELADA]:
+    - La confianza se calcula en Assessment Context según completitud del cuestionario estructurado, no en Matching Context.
+    - Congelada hasta decisión de producto (Opción A: eliminar, Opción B: documentar mapeo).
   - [ ] 10.2 Definir schema del evento `AssessmentCompleted`:
     - Crear dataclass `AssessmentCompletedEvent`:
       ```python
@@ -384,7 +401,7 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
     - Firma estándar Lambda: `def lambda_handler(event: dict, context: object) -> dict`.
     - Paso 1: Validar que `event["detail-type"] == "AssessmentCompleted"`. Si no: retorna `{"status": "ignored"}`.
     - Paso 2: Parsear `event["detail"]` → `AssessmentCompletedEvent` (reusa 10.2).
-    - Paso 3: Cargar `features.csv` desde S3 (o path local en desarrollo).
+    - Paso 3: Cargar `career_offerings` desde Aurora (o `features.csv` local en desarrollo).
     - Paso 4: Crear `StudentProfile` desde los campos del evento:
       - `riasec_scores` desde `event.riasec_scores`
       - Pesos desde `event.weights`
@@ -413,7 +430,7 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
       ```
     - Paso 11: Retornar `{"statusCode": 200, "body": json.dumps({"rankingId": ranking_id})}`.
     - Manejo de errores:
-      - Si `features.csv` no disponible: loguea, retorna `{"statusCode": 500}`.
+      - Si Aurora no disponible: loguea, retorna `{"statusCode": 500}`.
       - Si Aurora caído: queue local + reintento.
       - Si parse inválido: loguea, retorna `{"statusCode": 400}`.
     - Timeout Lambda: 30 segundos (suficiente para 6,208 combinaciones).
@@ -449,7 +466,7 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
     - Mockea `ScoringEngine`, `boto3.client("events")` y Aurora.
     - Verifica que el handler parsea el evento, ejecuta scoring y emite `RecommendationGenerated`.
     - Verifica error handling: evento con `detail-type` incorrecto → `status="ignored"`.
-    - Verifica error handling: `features.csv` no disponible → `statusCode=500`.
+    - Verifica error handling: Aurora no disponible → `statusCode=500`.
   - [ ] 10.7 Tests: `test_feedback_handler.py`:
     - Mockea API Gateway event con JWT válido.
     - Mockea `PyJWT.decode` y Aurora.
@@ -479,11 +496,11 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
     - Usado para health check del servicio local.
   - [ ] 11.4 Implementar event handler `@app.on_event("startup")`:
     - Inicializa componentes:
-      - `scoring_engine = ScoringEngine("data/features.csv", "data/feature_config.json")`.
+      - `scoring_engine = ScoringEngine(os.getenv("AURORA_ENDPOINT", "psycopg://localhost:5432/careermatch"), "data/feature_config.json")`.
     - Loguea "Matching Context local iniciado correctamente".
   - [ ] 11.5 Tests de integración: `test_app_score_flow.py`:
     - Usa `TestClient` de FastAPI.
-    - Fixture: cargar `tests/fixtures/features_50_careers.csv` (50 carreras, 10 con RIASEC semilla).
+    - Fixture: cargar `tests/fixtures/features_50_careers.csv` o tabla Postgres local con 50 registros.
     - Simula `POST /v1/matching/score` con perfil completo.
     - Verifica response: `status: "success"`, `top_5` con 5 items.
     - Verifica scores en `[0,1]`, ranks 1–5.
@@ -513,7 +530,7 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
 
 ---
 
-## Fase 3 — Persistencia y Matching Context Completo (Alta): Aurora, DynamoDB, Infraestructura Compartida
+## Fase 3 — Persistencia y Matching Context Completo (Alta): Aurora, Infraestructura Compartida
 
 - [ ] 13. Configurar Infraestructura AWS Base
   - [ ] 13.1 Crear tabla Aurora PostgreSQL vía AWS Console o AWS CLI:
@@ -528,16 +545,19 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
     - Instance type: `db.t3.medium` (demo).
     - Habilitar `pgvector` extension.
     - Anotar endpoint en `.env`: `AURORA_ENDPOINT=...amazonaws.com`.
-  - [ ] 13.2 Crear tabla DynamoDB `universities` vía AWS Console o Terraform:
-    - PK: `institution_id` (String).
-    - Atributos: `name`, `location` (antes region), `management_type` (Pública/Privada, antes tipo_institucion), `latitude`, `longitude`, `careers_ids` (StringSet).
-    - GSI: `location-index` (PK: `location`, SK: `institution_id`).
+  - [ ] 13.2 (Omitido — universities viven en AURORA schema `career.career_offerings`)
+    - Las universidades no tienen tabla DynamoDB separada. Toda la información de
+      carrera × universidad (incluyendo location, management_type, y georreferencia)
+      reside en `career.career_offerings` (Aurora PostgreSQL, schema `career`).
+    - El campo `location` en `career.career_offerings` sirve para filtrado y
+      georreferencia. No hay tabla DynamoDB `universities`.
   - [ ] 13.3 Consumir infraestructura compartida existente en lugar de crear desde cero:
-    - Leer SSM Parameters existentes: `AURORA_ENDPOINT`, `DYNAMODB_TABLE_UNIVERSITIES`, `EVENT_BUS_NAME` desde AWS Systems Manager Parameter Store.
+    - Leer SSM Parameters existentes: `AURORA_ENDPOINT`, `EVENT_BUS_NAME` desde AWS Systems Manager Parameter Store.
+    - (DYNAMODB_TABLE_UNIVERSITIES ya no existe — DynamoDB es solo para Notifications).
     - Leer `JWT_SECRET` desde Secrets Manager (compartido con Identity Context).
     - No crear EventBridge bus propio; usar `spark-match-events` existente.
     - Configurar permisos Lambda para publicar en EventBridge existente.
-    - NOTA: No crear Aurora, DynamoDB ni EventBridge desde este plan. Consumir los ya existentes.
+    - NOTA: No crear Aurora ni EventBridge desde este plan. Consumir los ya existentes. DynamoDB se usa exclusivamente para Notifications (fuera del alcance de Matching Context).
 
 - [ ] 14. Implementar `infra/db_schema.sql` — Esquema Aurora PostgreSQL
   - [ ] 14.1 Crear tabla `career_chunks` (para RAG, pgvector):
@@ -675,35 +695,42 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
     - Simular `POST /feedback` con JWT válido → persiste validación.
     - Verifica datos persistidos en Aurora (mockeado).
 
-- [ ] 19. Implementar Georreferencia — DynamoDB Universities
-  - [ ] 19.1 Crear tabla DynamoDB `universities` (vía AWS Console o Terraform):
-    - PK: `institution_id` (S).
-    - Atributos: `name` (S), `location` (S, antes region), `management_type` (S, Pública/Privada, antes tipo_institucion), `latitude` (N), `longitude` (N), `careers_ids` (SS).
-    - GSI: `location-index` con PK=`location`, SK=`institution_id`.
-    - NOTA: La tabla DynamoDB ya existe en AWS. Para desarrollo local, usar DynamoDB local (moto) o stub JSON.
+- [ ] 19. Implementar Georreferencia — Universidades desde Aurora `career.career_offerings`
+  - [ ] 19.1 (Omitido — DynamoDB `universities` NO existe)
+    - Las universidades residen en `career.career_offerings` (Aurora, schema `career`),
+      no en DynamoDB. DynamoDB se usa exclusivamente para Notifications (fuera del alcance
+      del Matching Context).
+    - Para consultar universidades, filtrar sobre `career.career_offerings.location`
+      directamente desde Aurora.
+  - [ ] 19.2 Implementar clase `UniversityQuery` en `backend/persistence/university_query.py`:
+    - Constructor: `__init__(self, db_connection_string: str)` — conexión a Aurora.
+    - Método `get_universities_by_location(self, location: str | None) -> list[dict]`:
+      ```sql
+      SELECT DISTINCT institution, location, management_type
+      FROM career.career_offering
+      WHERE ($1::text IS NULL OR location = $1)
+      ORDER BY institution
+      ```
+    - Retorna lista de dicts con `{institution, location, management_type}`.
+    - Método `get_all_locations(self) -> list[str]`:
+      ```sql
+      SELECT DISTINCT location FROM career.career_offerings ORDER BY location
+      ```
+    - Si `location=None` en `get_universities_by_location`: retorna todas (sin filtro).
     _Requerimientos: 9.3_
-  - [ ] (Pospuesto — producción) 19.2 Implementar `backend/lambda/universities_handler.py`:
-    - Endpoint `GET /universities?location=Lima` (querystring optional).
-    - Inicializa cliente DynamoDB: `dynamodb = boto3.resource('dynamodb', region_name=AWS_REGION)`.
-    - Si `location` en params: consulta GSI `location-index` → `table.query(IndexName='location-index', KeyConditionExpression='location = :location', ExpressionAttributeValues={':location': location})`.
-    - Si no: `table.scan()` (retorna todas).
-    - Retorna `{statusCode: 200, body: json.dumps(items)}`.
-    - NOTA: Para la demo, el endpoint `/universities` se sirve desde el mismo FastAPI (app.py) con DynamoDB mockeado o stub.
-    _Requerimientos: 9.3_
-- [ ] 19.3 Tests: `test_universities_handler.py`:
-    - Mockea DynamoDB con `moto`.
-    - Inserta 3 universidades (2 Lima, 1 Arequipa).
-    - Verifica listado completo retorna 3 items.
-    - Verifica filtrado por location retorna 2 items (Lima).
+  - [ ] 19.3 Tests: `test_university_query.py`:
+    - Usa Postgres local con tabla `career.career_offerings` poblada con 3+ registros.
+    - Verifica `get_universities_by_location("Lima")` retorna solo universidades con location="Lima".
+    - Verifica `get_universities_by_location(None)` retorna todas.
+    - Verifica `get_all_locations()` retorna lista única de locations.
 
 - [ ] 20. Checkpoint Fase 3 — Validación de Matching Context con Persistencia
   - [ ] 20.1 Ejecutar flujo completo contra recursos mockeados:
     - Postgres local (docker-compose) en lugar de Aurora.
-    - DynamoDB mockeado con `moto`.
     - Simular evento `AssessmentCompleted` con perfil completo → invoca `matching_handler.lambda_handler()`.
     - Verificar que emite `RecommendationGenerated` (mockear EventBridge).
     - Simular `POST /feedback` con JWT mockeado → persistido en Postgres.
-    - Consultar `/universities` → retorna lista, filtrado por location.
+    - Consultar `UniversityQuery.get_universities_by_location()` contra Postgres local → retorna lista, filtrado por location.
   - [ ] 20.2 Verificar aislamiento por `userId`:
     - Simular 2 eventos con distintos `userId`.
     - Feedback del usuario A → consultar feedback del usuario A → solo ve sus datos.
@@ -805,7 +832,7 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
     - Script para Leaflet: cargar biblioteca (CDN o npm).
   - [ ] (Opcional) 24.2 Agregar en `frontend/app.js`:
     - Función `displayMap(top5_items, location)` (recibe `profile.location`).
-    - Consumir `/universities?location={location}` vía `fetch()`.
+    - Consumir endpoint `/universities?location={location}` (responde desde Aurora `career.career_offerings`) vía `fetch()`.
     - Pintar marcadores de universidades en mapa (Leaflet markers).
     - Llamar después de generar ranking.
   - [ ] (Opcional) 24.3 Tests: verificación manual en navegador (no automatizados).
@@ -816,37 +843,58 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
 
 - [ ] 25. Implementar `data_pipeline/riasec_tagging.py` (Ampliación) — Pipeline Batch Completo
   - [ ] 25.1 Implementar script `data_pipeline/pipeline_runner.py`:
-    - Función `run_full_pipeline() -> str`:
+    - Función `run_full_pipeline(db_connection_string: str) -> str`:
       - Paso 1: `download_ponte_en_carrera()` → `data/raw.xlsx`.
-      - Paso 2: `clean_and_validate()` → `data/filtered.csv`.
-      - Paso 3: `generate_features()` → `data/features.csv`, `data/feature_config.json`.
+      - Paso 2: `clean_and_validate()` → `data/clean_data.csv` (intermedio).
+      - Paso 3: `generate_features()` → genera DataFrame con features normalizadas.
       - Paso 4: Extraer carreras únicas (`unique_careers = features_df[['id','career','career_family']].drop_duplicates(subset='career')`) → 554 filas.
       - Paso 4b: `tag_careers_with_bedrock(unique_careers)` — etiqueta solo las 554 carreras únicas (mockeado en demo, real en producción).
       - Paso 4c: `features_df = features_df.merge(riasec_tags, on='career', how='left')` — propaga etiquetas a las 6.208 filas.
       - Paso 5: `validate_sample()` → `data/riasec_validation_sample.csv` para revisión humana.
       - Paso 6: `apply_family_fallback()` → garantiza 100% carreras con RIASEC.
-      - Paso 7: Genera snapshot versionado: `snapshots/features/features_{timestamp}.csv`.
-      - Retorna ruta del snapshot.
+      - **Paso 7**: Escribir batch a Aurora PostgreSQL (schema `career`, tabla `career_offerings`):
+        - Conectar vía `psycopg2.connect(dsn=db_connection_string)`.
+        - Reemplazar snapshot completo: `DELETE FROM career.career_offerings;`.
+        - Insert batch con `executemany()` o `COPY` (≈ 6.208 filas):
+          ```python
+          rows = features_df.to_dict('records')
+          with conn.cursor() as cur:
+              for row in rows:
+                  cur.execute("""
+                      INSERT INTO career.career_offerings
+                      (career_id, career, institution, career_family, riasec_profile,
+                       riasec_source, monthly_income_imputed, annual_cost_imputed,
+                       admission_rate_imputed, duration_years_imputed,
+                       income_norm, cost_norm, admission_norm, duration_norm,
+                       location, management_type, institution_type, modalidad,
+                       snapshot_id)
+                      VALUES (...)
+                  """, row)
+              conn.commit()
+          ```
+      - **Paso 8**: Generar snapshot versionado local: `snapshots/features/features_{timestamp}.csv`
+        (solo como respaldo, no como fuente primaria).
+      - Retorna ruta del snapshot local.
     - Loguea cada paso.
     _Requerimientos: 6.1, 6.2, 6.4_
   - [ ] 25.2 Documentar trigger EventBridge (cron):
     - Cron expression: `cron(0 2 * * ? *)` (diario a las 2 AM UTC).
     - Target: AWS Batch job que invoca `uv run python -m data_pipeline.pipeline_runner`.
-    - Resultado: actualización automática de `data/features.csv` cada día.
+    - Resultado: actualización automática de `career.career_offerings` en Aurora cada día.
     _Requerimientos: 6.2_
   - [ ] 25.3 Tests: `test_pipeline_runner.py`:
     - Ejecuta `run_full_pipeline()` sobre fixture de 50 carreras (mockeando Bedrock, operando sobre carreras únicas).
     - Verifica que el tagging se aplicó sobre carreras únicas (no más de 50 filas etiquetadas).
     - Verifica que snapshot final tiene `riasec_profile` non-null en todas las filas (join propagó correctamente).
-    - Verifica que `features.csv` tiene columnas `income_norm`, `cost_norm`, `admission_norm`, `duration_norm` en `[0,1]`.
+    - Verifica que los datos en Aurora (mockeado) tienen columnas `income_norm`, `cost_norm`, `admission_norm`, `duration_norm` en `[0,1]`.
 
 - [ ] 26. Tests de Integración End-to-End con Fixtures Reales
   - [ ] 26.1 Crear fixtures en `tests/fixtures/`:
     - `catalog_50_careers.csv`: 50 carreras con datos verificables (ingresos, costos, admisión, duración).
     - `seed_riasec_10.csv`: 10 carreras con RIASEC etiquetado manualmente (semilla).
   - [ ] 26.2 Test: `test_integration_full_flow.py`:
-    - Setup: Carga fixtures en `data/`.
-    - Genera `features.csv` vía `run_full_pipeline()`.
+    - Setup: Poblar Postgres local con fixtures de `career.career_offerings`.
+    - Ejecuta `run_full_pipeline()` que escribe en Aurora `career.career_offerings` (mockeado o en Postgres local).
     - Crea `ScoringEngine` con fixtures.
     - Simula un evento `AssessmentCompleted` con perfil completo (riasec_scores, weights, filters).
     - Invoca `matching_handler.lambda_handler(event, context)`.
@@ -860,7 +908,7 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
 
 - [ ] 27. Validación de Restricciones No Funcionales
   - [ ] 27.1 Tests basados en propiedades: **Propiedad 4 — Reproducibilidad**. **Valida: Requerimiento 9 criterio 9.1**. Estrategia:
-    - Fijar snapshot `features.csv` (timestamp conocido).
+    - Fijar snapshot `features.csv` o snapshot de `career.career_offerings` (timestamp conocido).
     - Fijar config `feature_config.json` (versión conocida).
     - Fijar perfil usuario y pesos.
     - Ejecutar `rank_and_filter()` en dos procesos distintos (en paralelo).
@@ -884,9 +932,9 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
       - EventBridge (`spark-match-events`) para handlers async.
       - AI Advisor: servicio Python separado (repo `08-deep-agent`) para chat+RAG.
       - Matching Context (este repo): scoring determinístico en Python 3.12 Lambda.
-      - Aurora PostgreSQL: persistencia (feedback, rankings, pgvector).
-      - DynamoDB: georreferencia (universities).
-      - Bedrock: LLM (Claude) + Embeddings (Titan).
+    - Aurora PostgreSQL: persistencia (feedback, rankings, pgvector) + `career.career_offerings` (carreras × universidades).
+    - DynamoDB: solo Notifications (fuera del alcance de Matching Context).
+    - Bedrock: LLM (Claude) + Embeddings (Titan).
     - Instalación local: `uv sync`, `docker-compose up`.
     - Variables de entorno: copiar `.env.example` → `.env`, llenar valores AWS.
     - Comandos útiles:
