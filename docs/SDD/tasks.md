@@ -14,8 +14,9 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
     - Ejecutar `uv init` para crear `pyproject.toml` base.
     - Agregar dependencias con `uv add`:
       ```bash
-      uv add "boto3>=1.28.0" "fastapi>=0.104.0" "uvicorn>=0.24.0" "pydantic>=2.0.0" "psycopg2-binary>=2.9.0" "pgvector>=0.1.8" "sqlalchemy>=2.0.0" "PyJWT>=2.8.0" "cryptography>=41.0.0" "python-dotenv>=1.0.0" "pandas>=2.0.0" "numpy>=1.24.0" "openpyxl>=3.10.0" "selenium>=4.15.0" "requests>=2.31.0" "moto>=4.2.0"
-      # NOTA: PyJWT y cryptography son opcionales para MVP (solo necesarios si se implementa JWT, tarea 16.O). Se incluyen por si el equipo decide activarlo.
+      uv add "boto3>=1.28.0" "aws-lambda-powertools>=2.0.0" "fastapi>=0.104.0" "uvicorn>=0.24.0" "pydantic>=2.0.0" "psycopg2-binary>=2.9.0" "pgvector>=0.1.8" "sqlalchemy>=2.0.0" "PyJWT>=2.8.0" "cryptography>=41.0.0" "python-dotenv>=1.0.0" "pandas>=2.0.0" "numpy>=1.24.0" "openpyxl>=3.10.0" "selenium>=4.15.0" "requests>=2.31.0" "moto>=4.2.0"
+      # NOTA: aws-lambda-powertools para logger/tracer/metrics en handlers Lambda de producción.
+      # PyJWT y cryptography son opcionales para MVP (solo necesarios si se implementa JWT, tarea 16.O). Se incluyen por si el equipo decide activarlo.
       uv add --dev "pytest>=7.0.0" "pytest-asyncio>=0.21.0" "pytest-cov>=4.1.0"
       ```
     - `uv sync` genera `uv.lock` automáticamente.
@@ -450,17 +451,16 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
       ```
     - Este evento es consumido por el AI Advisor para generar explicaciones.
     _Requerimientos: 8.2_
-  - [ ] 10.5 Implementar `backend/lambda/feedback_handler.py` — Feedback Lambda Handler:
+  - [ ] 10.5 Implementar `backend/lambda/feedback_handler.py` — Feedback Lambda Handler (event-driven):
     - Firma: `def lambda_handler(event: dict, context: object) -> dict`.
-    - Activado por API Gateway v2 (ruta `POST /feedback`).
-    - Paso 1: Extraer JWT de `event["headers"]["Authorization"]`.
-    - Paso 2: Validar JWT con `PyJWT.decode(jwt, secret, algorithms=["HS256"])` → `userId`.
-      - Si inválido: retorna `{"statusCode": 401, "body": "Unauthorized"}`.
-    - Paso 3: Parsear body: `{rankingId, validationScore, selectedCareer, notes}`.
-    - Paso 4: Validar `validationScore ∈ [1, 5]`: si no, `{"statusCode": 422}`.
-    - Paso 5: Verificar que `rankingId` pertenece a `userId` (security).
-    - Paso 6: Persistir feedback en Aurora (tabla `feedback`).
-    - Paso 7: Retornar `{"statusCode": 200, "body": json.dumps({"status": "success"})}`.
+    - Activado por EventBridge (detail-type: `FeedbackSubmitted`), NO por API Gateway.
+    - Paso 1: Validar `event["detail-type"] == "FeedbackSubmitted"`. Si no: retorna `{"status": "ignored"}`.
+    - Paso 2: Parsear `event["detail"]`: `{userId, rankingId, validationScore, selectedCareer, notes}`.
+    - Paso 3: Validar `validationScore ∈ [1, 5]`: si no, loguea warning, retorna `{"statusCode": 422}`.
+    - Paso 4: Verificar que `rankingId` existe en tabla `rankings` y pertenece a `userId`.
+    - Paso 5: Persistir feedback en Aurora (tabla `feedback` - ver 14.2).
+    - Paso 6: Retornar `{"statusCode": 200, "body": json.dumps({"status": "success"})}`.
+    - NOTA: No hay endpoint REST `POST /feedback`. El feedback se envía como evento desde el AI Advisor o frontend.
     _Requerimientos: 8.1, 9.1_
   - [ ] 10.6 Tests: `test_matching_handler.py`:
     - Mockea evento EventBridge con `AssessmentCompleted` válido.
@@ -469,11 +469,11 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
     - Verifica error handling: evento con `detail-type` incorrecto → `status="ignored"`.
     - Verifica error handling: Aurora no disponible → `statusCode=500`.
   - [ ] 10.7 Tests: `test_feedback_handler.py`:
-    - Mockea API Gateway event con JWT válido.
-    - Mockea `PyJWT.decode` y Aurora.
-    - Verifica validación: score fuera de rango → 422.
-    - Verifica validación: JWT inválido → 401.
-    - Verifica flujo exitoso → 200 con `{"status": "success"}`.
+    - Mockea evento EventBridge con `FeedbackSubmitted` válido.
+    - Mockea `PyJWT.decode` y Aurora (si aplica validación JWT desde el evento).
+    - Verifica validación: score fuera de rango → `{"statusCode": 422}`.
+    - Verifica flujo exitoso → `{"statusCode": 200}`.
+    - Verifica error handling: evento con `detail-type` incorrecto → `status="ignored"`.
   - [ ] 10.8 Tests basados en propiedades: **Propiedad 5 — Confidence Monótono**. **Valida: Requerimiento 4 criterio 4.1**. Estrategia:
     - Generar secuencias aleatorias de actualizaciones: `profile` comienza vacío → agrega riasec → agrega pesos.
     - Invariante: `confidence_score` nunca disminuye.
@@ -483,45 +483,46 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
   - [ ] 11.1 Implementar fixture de FastAPI:
     - `app = FastAPI(title="CareerMatch Perú — Matching Context (local dev)")`.
     - Variable global `scoring_engine = None` (inicializada en startup).
-    - NOTA: Este entrypoint es solo para desarrollo local. En producción, los handlers son Lambdas individuales.
-  - [ ] 11.2 Implementar endpoint `POST /v1/matching/score`:
-    - Recibe JSON: `{riasec_scores: dict, weights: dict, filters: dict, userId: str}`.
-    - Construye `StudentProfile` desde el request.
+    - NOTA: Este entrypoint es solo para desarrollo local. En producción, los handlers son Lambdas individuales con Powertools for Python.
+  - [ ] 11.2 Implementar endpoint `GET /v1/match/recommendations?userId={userId}`:
+    - Recibe query param `userId` (JWT sub).
+    - Construye `StudentProfile` desde los datos del usuario (consultados desde Aurora o desde el payload del evento).
     - Invoca `scoring_engine.rank_and_filter(profile, features_df)`.
-    - Retorna `{status: "success", top_5: list[RankingItem]}`.
-    - HTTP 500 si error interno (loguea sin PII).
-    - NOTA: Este endpoint simula localmente lo que el Lambda `matching_handler` hace en producción.
-    _Requerimientos: 8.2_
-  - [ ] 11.3 Implementar endpoint `GET /health`:
+    - Retorna `{status: "success", userId, recommendations: list[RankingItem], rankingId, snapshot_id, timestamp}`.
+    - HTTP 404 si no hay recomendaciones, 500 si error interno.
+    _Requerimientos: 8.1_
+  - [ ] 11.3 Implementar endpoint `GET /v1/match/{careerId}/affinity?userId={userId}`:
+    - Recibe path param `careerId` y query param `userId`.
+    - Busca la carrera en `features_df` por `id`.
+    - Calcula afinidad RIASEC con el perfil del usuario.
+    - Retorna `{status: "success", userId, careerId, career, institution, affinity: {...}, verifiable_data: {...}}`.
+    - HTTP 404 si carrera no encontrada, 500 si error interno.
+    _Requerimientos: 8.1_
+  - [ ] 11.4 Implementar endpoint `GET /health`:
     - Retorna `{status: "ok"}`.
     - Usado para health check del servicio local.
-  - [ ] 11.4 Implementar event handler `@app.on_event("startup")`:
+  - [ ] 11.5 Implementar event handler `@app.on_event("startup")`:
     - Inicializa componentes:
       - `scoring_engine = ScoringEngine(os.getenv("AURORA_ENDPOINT", "psycopg://localhost:5432/careermatch"), "data/feature_config.json")`.
     - Loguea "Matching Context local iniciado correctamente".
-  - [ ] 11.5 Tests de integración: `test_app_score_flow.py`:
+  - [ ] 11.6 Tests de integración: `test_app_matching_flow.py`:
     - Usa `TestClient` de FastAPI.
     - Fixture: cargar `tests/fixtures/features_50_careers.csv` o tabla Postgres local con 50 registros.
-    - Simula `POST /v1/matching/score` con perfil completo.
-    - Verifica response: `status: "success"`, `top_5` con 5 items.
-    - Verifica scores en `[0,1]`, ranks 1–5.
+    - Simula `GET /v1/match/recommendations` con perfil completo.
+    - Verifica response: `status: "success"`, `recommendations` con 5 items.
+    - Simula `GET /v1/match/{careerId}/affinity` con careerId existente.
+    - Verifica response: `status: "success"`, `affinity` con scores en `[0,1]`.
+    - Verifica 404 con careerId inexistente.
 
 - [ ] 12. Checkpoint Fase 2 — Validación de Scoring Local (Matching Context)
   - [ ] 12.1 Levantar servicio: `docker-compose up -d` (backend + postgres local).
   - [ ] 12.2 Ejecutar scoring local vía curl:
     ```bash
-    curl -X POST http://localhost:8000/v1/matching/score \
-      -H "Content-Type: application/json" \
-      -d '{
-        "riasec_scores": {"R": 8, "I": 9, "A": 7, "S": 6, "E": 5, "C": 4},
-        "weights": {"w_afinidad": 0.3, "w_ingreso": 0.25, "w_costo": 0.2, "w_admision": 0.15, "w_duracion": 0.1},
-        "filters": {"location": null, "management_type": null, "presupuesto_max": null, "modalidad": null},
-        "userId": "test-user"
-      }'
+    curl -X GET "http://localhost:8000/v1/match/recommendations?userId=test-user"
     ```
-    - Respuesta esperada: `{"status": "success", "top_5": [...]}`.
-  - [ ] 12.3 Verificar que Top-5 tiene:
-    - 5 items, ranks 1–5.
+    - Respuesta esperada: `{"status": "success", "recommendations": [...], ...}`.
+  - [ ] 12.3 Verificar que recomendaciones tiene:
+    - `recommendations` con 5 items, ranks 1–5.
     - `concordancia_score` en `[0,1]`.
     - `scores_by_criterion` con 5 criterios.
     - `datos_verificables` con claves `monthly_income_imputed`, `annual_cost_imputed`, `admission_rate_imputed`, `duration_years_imputed`.
@@ -666,17 +667,17 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
     - Si válido: extraer `userId` de `payload["sub"]`.
     - NOTA: El endpoint `/v1/auth/login` y `/v1/auth/register` viven en el Identity Context (TypeScript/Lambda). El Matching Context solo consume/valida JWT; no emite ni gestiona sesiones.
     _Requerimientos: 8.1, 8.3_
-  - [ ] 17.2 Implementar `feedback_handler.lambda_handler(event, context)` (ya cubierto en 10.5):
-    - Activado por API Gateway v2 (ruta `POST /feedback`).
-    - Valida JWT → extrae `userId`.
+  - [ ] 🚫 17.2 Implementar `feedback_handler.lambda_handler(event, context)` (ya cubierto en 10.5):
+    - Activado por EventBridge (detail-type: `FeedbackSubmitted`), NO por API Gateway.
+    - Valida `userId` desde el evento.
     - Parsea body → persiste feedback en Aurora.
-    - Retorna 200/401/422 según corresponda.
+    - Retorna 200/422 según validación.
     _Requerimientos: 8.1, 9.1_
-  - [ ] 17.3 Tests: `test_lambda_handlers.py`:
-    - Mockea eventos API Gateway con JWT válido e inválido.
-    - Verifica `/feedback` con JWT válido → 200.
-    - Verifica `/feedback` con JWT inválido → 401.
-    - Verifica `/feedback` con score fuera de rango → 422.
+  - [ ] 🚫 17.3 Tests: `test_lambda_handlers.py`:
+    - Mockea eventos EventBridge con `FeedbackSubmitted` válido e inválido.
+    - Verifica feedback con datos válidos → 200.
+    - Verifica feedback con score fuera de rango → 422.
+    - (JWT validation ya no aplica en feedback_handler — el evento contiene userId verificado por el emisor)
 
 - [ ] 18. Integrar JWT como mecanismo único de autenticación en Lambdas
   - [ ] 18.1 Integrar `JWTValidator` en `matching_handler`:
@@ -685,16 +686,15 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
     - Se confía en el `userId` del evento (Assessment Context ya validó JWT antes de emitir).
     - Validar que `event["detail"]["userId"]` no sea nulo o vacío.
     _Requerimientos: 8.3_
-  - [ ] 18.2 Integrar `JWTValidator` en `feedback_handler`:
-    - El `feedback_handler` es invocado por API Gateway, recibe JWT en header `Authorization`.
-    - Extraer token, validar, extraer `userId`.
-    - Verificar que el `rankingId` del body pertenece al `userId` del token (security: no validar feedback de otro usuario).
-    - Si `userId` no coincide: retorna 403.
+  - [ ] 🚫 18.2 Integrar `JWTValidator` en `feedback_handler`:
+    - El `feedback_handler` es invocado por EventBridge, NO por API Gateway.
+    - El evento `FeedbackSubmitted` ya contiene `userId` validado por el emisor (AI Advisor o frontend).
+    - Se confía en el `userId` del evento.
+    - Validar que `event["detail"]["userId"]` no sea nulo o vacío.
     _Requerimientos: 8.3, 9.1_
-  - [ ] 18.3 Tests de integración: `test_auth_persistence_integration.py`:
-    - Flujo: mockear `JWTValidator.validate()` → retorna payload con `userId`.
-    - Simular evento `AssessmentCompleted` → `matching_handler` genera ranking.
-    - Simular `POST /feedback` con JWT válido → persiste validación.
+  - [ ] 🚫 18.3 Tests de integración: `test_auth_persistence_integration.py`:
+    - Flujo: mockear evento `AssessmentCompleted` → `matching_handler` genera ranking.
+    - Mockear evento `FeedbackSubmitted` → `feedback_handler` persiste validación.
     - Verifica datos persistidos en Aurora (mockeado).
 
 - [ ] 19. Implementar Georreferencia — Universidades desde Aurora `career.career_offerings`
@@ -731,7 +731,7 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
     - Postgres local (docker-compose) en lugar de Aurora.
     - Simular evento `AssessmentCompleted` con perfil completo → invoca `matching_handler.lambda_handler()`.
     - Verificar que emite `RecommendationGenerated` (mockear EventBridge).
-    - Simular `POST /feedback` con JWT mockeado → persistido en Postgres.
+    - Simular evento `FeedbackSubmitted` → persistido en Postgres.
     - Consultar `UniversityQuery.get_universities_by_location()` contra Postgres local → retorna lista, filtrado por location.
   - [ ] 20.2 Verificar aislamiento por `userId`:
     - Simular 2 eventos con distintos `userId`.
@@ -770,7 +770,7 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
     - Script para Leaflet: cargar biblioteca (CDN o npm).
   - [ ] (Opcional) 24.2 Agregar en `frontend/app.js`:
     - Función `displayMap(top5_items, location)` (recibe `profile.location`).
-    - Consumir endpoint `/universities?location={location}` (responde desde Aurora `career.career_offerings`) vía `fetch()`.
+    - Consultar ubicaciones desde Career Context (`/v1/careers/*`) o desde Aurora `career.career_offerings`.
     - Pintar marcadores de universidades en mapa (Leaflet markers).
     - Llamar después de generar ranking.
   - [ ] (Opcional) 24.3 Tests: verificación manual en navegador (no automatizados).
