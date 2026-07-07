@@ -76,14 +76,18 @@ Persistencia:
     ├→ Aurora PostgreSQL: feedback, rankings, pgvector (career_chunks)
     └→ DynamoDB: universities (georreferencia, GSI location-index)
 
-Pipeline de Datos (batch, EventBridge cron → AWS Batch/Fargate task):
-    Ingestion (Selenium, Ponte en Carrera)
+Pipeline de Datos (batch):
+    data/raw.xlsx / snapshot existente (fuente primaria — ver nota)
       → Data Clean
       → Feature Engineering (normalización MinMax)
       → Extraer carreras únicas (554 distinct `career`, NO las 6.208 filas)
       → RIASEC Tagging sobre unique careers (Bedrock few-shot)
       → Join RIASEC tags contra features.csv por `career`
       → features.csv (snapshot versionado, ahora con columna `riasec_profile`)
+
+    Nota: `ingestion.py` (Selenium, Ponte en Carrera) es opcional para la demo. Los snapshots existentes en `snapshots/raw/` contienen datos suficientes. Si se requiere actualización, `DataLoader.load()` restaura desde el snapshot más reciente automáticamente. El job de scraping Selenium puede ejecutarse como cron/EventBridge programado (semanal o mensual), no como paso bloqueante del pipeline.
+
+    Pipeline: EventBridge cron → AWS Batch/Fargate task (producción) | flujo local manual (demo):
 ```
 
 ### 2.2 Arquitectura para la Demo (un solo FastAPI)
@@ -1479,7 +1483,71 @@ class CareerMatchApp {
 
 ---
 
-### `data_pipeline/ingestion.py` — Descarga Automatizada
+### `data_pipeline/data_loading.py` — Carga desde Snapshot (Primaria)
+
+**Responsabilidad:** Proveer `data/raw.xlsx` listo para consumo, priorizando fuente existente (snapshot) sobre descarga Selenium.
+
+```python
+from pathlib import Path
+import logging
+import shutil
+
+class DataLoader:
+    def __init__(
+        self,
+        data_dir: str = "data",
+        snapshots_dir: str = "snapshots"
+    ):
+        """Inicializa cargador con directorios de datos y snapshots."""
+        self.data_dir = Path(data_dir)
+        self.snapshots_dir = Path(snapshots_dir) / "raw"
+        self.logger = logging.getLogger(__name__)
+    
+    def load(self) -> str:
+        """
+        Provee archivo raw.xlsx listo para DataCleaner.
+        
+        Prioridad:
+        1. data/raw.xlsx existente (fuente primaria ya disponible)
+        2. snapshot más reciente en snapshots/raw/ (restaura automática)
+        3. Ejecutar ingestion.py como fallback si el script existe
+        
+        Returns:
+            Ruta a data/raw.xlsx (copiado desde snapshot si fue necesario)
+        
+        Fallback:
+        - Si no hay raw.xlsx ni snapshots ni ingestion.py:
+          raise FileNotFoundError("No hay fuente de datos disponible")
+        """
+        raw_file = self.data_dir / "raw.xlsx"
+        if raw_file.exists():
+            self.logger.info(f"Usando raw.xlsx existente: {raw_file}")
+            return str(raw_file)
+        
+        # Buscar snapshot más reciente
+        snapshots = sorted(self.snapshots_dir.glob("raw_*.xlsx"), reverse=True)
+        if snapshots:
+            latest = snapshots[0]
+            shutil.copy(latest, raw_file)
+            self.logger.info(f"Restaurado desde snapshot: {latest} → {raw_file}")
+            return str(raw_file)
+        
+        # Fallback: intentar ingestion.py
+        try:
+            from data_pipeline.ingestion import DataIngestion
+            ingestor = DataIngestion()
+            return ingestor.download()
+        except ImportError:
+            raise FileNotFoundError(
+                "No hay raw.xlsx, snapshots ni ingestion.py disponible"
+            )
+```
+
+> **Nota:** `ingestion.py` (Selenium) es **opcional** para la demo. Los snapshots existentes son la fuente primaria. Ver tarea `(Opcional) 2.O` en tasks.md.
+
+---
+
+### `data_pipeline/ingestion.py` — Job de Refresco Selenium (Opcional)
 
 ```python
 from selenium import webdriver
@@ -1512,6 +1580,10 @@ class DataIngestion:
             Ruta a data/raw.xlsx
         
         Timeout: ≤ 120 segundos total
+        
+        NOTA: Este método es opcional. La fuente primaria es el snapshot
+        existente (DataLoader.load()). Este job se ejecuta como refresco
+        programado (cron/EventBridge), no como paso bloqueante del pipeline.
         """
         options = webdriver.ChromeOptions()
         options.add_argument("--no-sandbox")
@@ -1524,25 +1596,20 @@ class DataIngestion:
             driver.get(self.minedu_url)
             wait = WebDriverWait(driver, 30)
             
-            # Clic en "Buscar"
             btn_buscar = wait.until(EC.element_to_be_clickable((By.ID, "btnBuscar")))
             btn_buscar.click()
             
-            # Esperar descarga
             import time
-            time.sleep(5)  # Espera a que descargue
+            time.sleep(5)
             
-            # Clic en "Descargar"
             btn_descargar = wait.until(
                 EC.element_to_be_clickable((By.ID, "descargarDondeEstudioExcel"))
             )
             btn_descargar.click()
             
-            # Esperar archivo
             time.sleep(10)
             raw_file = self.output_dir / "raw.xlsx"
             if raw_file.exists():
-                # Crear snapshot
                 self.create_snapshot(str(raw_file))
                 self.logger.info(f"Descarga completada: {raw_file}")
                 return str(raw_file)
@@ -3460,7 +3527,8 @@ careermatch-peru/
 │
 ├── data_pipeline/
 │   ├── __init__.py
-│   ├── ingestion.py             # Selenium Ponte en Carrera
+│   ├── data_loading.py          # Carga desde snapshot (fuente primaria)
+│   ├── ingestion.py             # Selenium Ponte en Carrera (Opcional)
 │   ├── data_clean.py            # Limpieza pandas
 │   ├── feature_engineering.py   # Imputación + normalización
 │   ├── riasec_tagging.py        # Bedrock few-shot + validation
@@ -3585,7 +3653,8 @@ careermatch-peru/
 
 ### Fase 5: Pipeline de Datos
 
-- [ ] Implementar `data_pipeline/ingestion.py` (Selenium)
+- [ ] Implementar `data_pipeline/data_loading.py` (carga desde snapshot existente)
+- [ ] (Opcional) Implementar `data_pipeline/ingestion.py` (Selenium — job de refresco, no bloqueante)
 - [ ] Implementar `data_pipeline/feature_engineering.py` (normalización)
 - [ ] Implementar `data_pipeline/riasec_tagging.py` (Bedrock few-shot)
 - [ ] Generar `data/features.csv` (snapshot 1)
