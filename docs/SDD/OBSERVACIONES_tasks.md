@@ -60,6 +60,27 @@
 - Las tareas referencian `_Requerimientos: X.Y_`, pero `requirements.md` y `PRD.md` aún no están
   actualizados; verificar que esos IDs existan tras propagar.
 
+### Alineación de stack: el backend de Angel vs tasks.md (importante)
+
+Angel ya avanzó el backend en `03-backend` (rama `feature/scaffolding-fase-1`): un scaffold
+serverless DDD+EDA con el contexto **Identity** funcional (register/login/JWT), EventBridge,
+AWS SAM y **14 ADRs** propios. Muy sólido, pero su stack **no coincide con el `tasks.md`**:
+
+| Tema | tasks.md (David) | Backend de Angel |
+|---|---|---|
+| Lenguaje | Python en todo el backend | **TypeScript** (Python solo el agente) |
+| Compute | Fargate + FastAPI para `/chat` | **Lambda** para todo (su ADR-001 descarta Fargate) |
+| Framework Lambda | boto3 puro | **Middy + Zod + Powertools** (su ADR-013) |
+| Gestor | uv (Python) | **npm workspaces** |
+| Auth | sesión / JWT simple | **Identity completo** (register/login/usuarios) |
+
+Coinciden en: serverless AWS, Aurora+pgvector, e híbrido con servidor Python para el agente
+(su ADR-012 ≈ ADR-001 de este repo). El `Identity/login` de Angel también va en sentido contrario
+a la simplificación de "sesión anónima" (ver arriba).
+
+→ **Definir cuál es la fuente de verdad del stack backend antes de repartir tareas** (Python/FastAPI
+del tasks.md vs TypeScript-serverless ya construido por Angel). Si no, hay retrabajo asegurado.
+
 ## nombre 2:
 
 - observacion 01
