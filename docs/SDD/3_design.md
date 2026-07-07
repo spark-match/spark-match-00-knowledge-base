@@ -151,7 +151,10 @@ El diseño original planteaba Fargate para el chat porque "Lambda no es adecuado
 
 ## Restricciones Transversales
 
-- **Package manager:** `uv` (no Poetry/Conda, no pip puro).
+> **Alcance:** Las siguientes reglas aplican **exclusivamente al Matching Context (`contexts/matching/`) y su data pipeline**. El backend completo del monorepo tiene sus propias convenciones: TypeScript con Middy (middleware Lambda), Zod (validación), Powertools for TypeScript (observabilidad), y npm workspaces como gestor de paquetes.
+
+- **Package manager (Python):** `uv` (no Poetry/Conda, no pip puro).
+- **Linter/Formatter (Python):** `ruff` (estándar del monorepo; ya existe `ruff.toml` en la raíz). No usar `black`, `flake8` ni `isort`.
 - **Framework Lambda (Python):** AWS Lambda Powertools for Python (logger, tracer, metrics) + `boto3` para servicios AWS.
 - **Framework servicio local (Matching Context):** FastAPI + Uvicorn (solo desarrollo local, no para producción).
 - **Cobertura tests:** ≥ 60% en `scoring`, `data_pipeline`.
