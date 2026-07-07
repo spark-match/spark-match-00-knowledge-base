@@ -2,7 +2,7 @@
 
 ## Descripción General
 
-La implementación avanza en cinco fases estrictamente incrementales sobre AWS, cada una dejando el sistema en un estado funcional, integrado y validado: primero se construye el pipeline de datos (`ingestion`, `data_clean`, `feature_engineering`) y el `ScoringEngine` determinístico como fundación aislada sin dependencias externas; luego se implementa el flujo conversacional completo (Bloques A/B/C, interpretación LLM vía Bedrock, sesión en memoria Fargate) como servicio funcional de punta a punta con fixtures locales; después se integra el backend híbrido real (Lambda stateless para `/session/create` y `/feedback`, Aurora PostgreSQL para persistencia, DynamoDB para georreferencia, JWT sin estado); luego se añaden capacidades secundarias opcionales (RAG con pgvector, embeddings Bedrock Titan, visualización de mapa); y finalmente se cierra con etiquetado RIASEC a escala completa (6,208 carreras vía Bedrock batch), tests de integración con fixtures reales, validación de propiedades de corrección y documentación final. Cada fase termina con un checkpoint explícito que verifica progreso integrado e inspecciona antes de continuar.
+La implementación avanza en cinco fases estrictamente incrementales sobre AWS, cada una dejando el sistema en un estado funcional, integrado y validado: primero se construye el pipeline de datos (`ingestion`, `data_clean`, `feature_engineering`) y el `ScoringEngine` determinístico como fundación aislada sin dependencias externas; luego se implementa el flujo conversacional completo (Bloques A/B/C, interpretación LLM vía Bedrock, sesión en memoria Fargate) como servicio funcional de punta a punta con fixtures locales; después se integra el backend híbrido real (Lambda stateless para `/session/create` y `/feedback`, Aurora PostgreSQL para persistencia, DynamoDB para georreferencia, JWT sin estado); luego se añaden capacidades secundarias opcionales (RAG con pgvector, embeddings Bedrock Titan, visualización de mapa); y finalmente se cierra con etiquetado RIASEC a escala completa (554 carreras únicas vía Bedrock batch + join a las 6,208 filas), tests de integración con fixtures reales, validación de propiedades de corrección y documentación final. Cada fase termina con un checkpoint explícito que verifica progreso integrado e inspecciona antes de continuar.
 
 ## Tareas
 
@@ -93,7 +93,9 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - Verifica que fixtures con valores extremos/faltantes se imputan correctamente sin errores.
 
 - [ ] 4. Implementar `data_pipeline/riasec_tagging.py` — Etiquetado RIASEC (Bedrock + Validación Muestral)
-  - [ ] 4.1 Implementar función `tag_careers_with_bedrock(catalog_df: pd.DataFrame, seed_examples: pd.DataFrame) -> pd.DataFrame`:
+  - [ ] 4.1 Implementar función `tag_careers_with_bedrock(catalog_unique: pd.DataFrame, seed_examples: pd.DataFrame) -> pd.DataFrame`:
+    - El tagging opera sobre **carreras únicas** (554 distinct `career`), NO sobre las 6.208 filas de features.csv.
+    - Input `catalog_unique`: DataFrame deduplicado por `career` (1 fila por carrera única), con columnas `id, career, career_family, description`.
     - Inicializa cliente `boto3.client('bedrock-runtime', region_name=AWS_REGION)`.
     - Para cada carrera SIN `riasec_profile`:
       - Construye prompt few-shot con 10 carreras semilla (nombre, family, descripción → código RIASEC esperado).
@@ -104,7 +106,8 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
       - Si JSON inválido: reintenta máximo 3 veces.
       - Si falla tras 3 reintentos: asigna `riasec_source='pending'`, deja `riasec_profile=None` (será fallback luego).
     - Loguea cada intento y resultado para auditoría.
-    - Retorna DataFrame con columnas `riasec_profile` y `riasec_source` actualizadas.
+    - Retorna DataFrame con columnas `id, career, riasec_profile, riasec_source` (554 filas, 1 por carrera única).
+    - **Post-condición**: Quien invoca debe hacer `features_df = features_df.merge(riasec_tags, on='career', how='left')` para propagar `riasec_profile` a las 6.208 filas.
     _Requerimientos: 6.2_
   - [ ] 4.2 Implementar función `validate_sample(df: pd.DataFrame, sample_size: int = 300, seed: int = 42) -> None`:
     - Filtra filas con `riasec_source == 'llm_tagged'`.
@@ -122,11 +125,13 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     _Requerimientos: 6.4, 10.3_
   - [ ] 4.4 Tests: `test_riasec_tagging.py`:
     - Mockea cliente Bedrock: respuesta válida `{"riasec_profile": "RIA", "confidence": 0.95}`, respuesta inválida (JSON malformado), timeout.
-    - Fixture: 10 carreras (5 con `riasec_profile` semilla, 5 sin). Verifica:
-      - `tag_careers_with_bedrock` retorna DataFrame con 5 carreras taggeadas (`llm_tagged`) y 5 sin cambios.
+    - Fixture: 10 carreras únicas (5 con `riasec_profile` semilla, 5 sin). Verifica:
+      - `tag_careers_with_bedrock` recibe DataFrame deduplicado (1 fila por `career`).
+      - Retorna DataFrame con 5 carreras taggeadas (`llm_tagged`) y 5 sin cambios.
       - `apply_family_fallback` rellena las 5 pendientes con moda de su familia.
       - Al finalizar: 100% filas tienen `riasec_profile` no-nulo.
     - Verifica que intenta 3 veces antes de marcar como `pending`.
+    - Verifica que el merge posterior (`features_df.merge(riasec_tags, on='career')`) propaga correctamente el RIASEC a todas las filas de cada carrera.
 
 - [ ] 5. Implementar `backend/models.py` — Modelos Pydantic/Dataclasses
   - [ ] 5.1 Implementar dataclass `StudentProfile`:
@@ -243,7 +248,7 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - Verificar que `DataIngestion.download()` retorna path válido (o fallback si portal no disponible).
     - Verificar que `DataCleaner.clean()` retorna DataFrame válido sin filas incompletas.
     - Verificar que `FeatureEngineer.run_pipeline()` genera `features.csv` con columnas `income_norm`, `cost_norm`, `admission_norm`, `duration_norm` en `[0,1]`.
-    - Verificar que `tag_careers_with_bedrock` (mockeado) tagea correctamente y `apply_family_fallback` elimina `pending`.
+    - Verificar que `tag_careers_with_bedrock` opera sobre carreras únicas (mockeado) y el join subsiguiente propaga correctamente `riasec_profile` a features_df.
     - Verificar que `ScoringEngine.rank_and_filter()` produce Top-5 con scores en `[0,1]`, determinístico, desempatado correctamente.
     - Cobertura mínima 60% en `data_pipeline` y `backend/scoring.py`.
     - Ejecutar test de determinismo (Propiedad 1) y pesos válidos (Propiedad 6): ambos deben pasar.
@@ -764,7 +769,9 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
       - Paso 1: `download_ponte_en_carrera()` → `data/raw.xlsx`.
       - Paso 2: `clean_and_validate()` → `data/filtered.csv`.
       - Paso 3: `generate_features()` → `data/features.csv`, `data/feature_config.json`.
-      - Paso 4: `tag_careers_with_bedrock()` con las 6,208 carreras (mockeado en demo, real en producción).
+      - Paso 4: Extraer carreras únicas (`unique_careers = features_df[['id','career','career_family']].drop_duplicates(subset='career')`) → 554 filas.
+      - Paso 4b: `tag_careers_with_bedrock(unique_careers)` — etiqueta solo las 554 carreras únicas (mockeado en demo, real en producción).
+      - Paso 4c: `features_df = features_df.merge(riasec_tags, on='career', how='left')` — propaga etiquetas a las 6.208 filas.
       - Paso 5: `validate_sample()` → `data/riasec_validation_sample.csv` para revisión humana.
       - Paso 6: `apply_family_fallback()` → garantiza 100% carreras con RIASEC.
       - Paso 7: Genera snapshot versionado: `snapshots/features/features_{timestamp}.csv`.
@@ -777,8 +784,9 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - Resultado: actualización automática de `data/features.csv` cada día.
     _Requerimientos: 6.2_
   - [ ] 25.3 Tests: `test_pipeline_runner.py`:
-    - Ejecuta `run_full_pipeline()` sobre fixture de 50 carreras (mockeando Bedrock).
-    - Verifica que snapshot final tiene 50 carreras, todas con `riasec_profile` non-null.
+    - Ejecuta `run_full_pipeline()` sobre fixture de 50 carreras (mockeando Bedrock, operando sobre carreras únicas).
+    - Verifica que el tagging se aplicó sobre carreras únicas (no más de 50 filas etiquetadas).
+    - Verifica que snapshot final tiene `riasec_profile` non-null en todas las filas (join propagó correctamente).
     - Verifica que `features.csv` tiene columnas `income_norm`, `cost_norm`, `admission_norm`, `duration_norm` en `[0,1]`.
 
 - [ ] 26. Tests de Integración End-to-End con Fixtures Reales

@@ -52,8 +52,10 @@ Pipeline de Datos (batch, EventBridge cron → AWS Batch/Fargate task):
     Ingestion (Selenium, Ponte en Carrera)
       → Data Clean
       → Feature Engineering (normalización MinMax)
-      → RIASEC Tagging (Bedrock few-shot)
-      → features.csv (snapshot versionado)
+      → Extraer carreras únicas (554 distinct `career`, NO las 6.208 filas)
+      → RIASEC Tagging sobre unique careers (Bedrock few-shot)
+      → Join RIASEC tags contra features.csv por `career`
+      → features.csv (snapshot versionado, ahora con columna `riasec_profile`)
 ```
 
 ### 2.2 Por qué Fargate (no Lambda) para el agente
@@ -494,7 +496,8 @@ class ScoringEngine:
         - Carga features.csv en memoria (Pandas DataFrame)
         - Carga config.json (parámetros de normalización)
         - Valida esquema (columnas de features.csv): id, career, institution, 
-          riasec_profile, income_norm, cost_norm, admission_norm, 
+          riasec_profile (agregado vía join desde tabla RIASEC de 554 carreras únicas),
+          income_norm, cost_norm, admission_norm, 
           duration_norm, location, management_type, y las 4 imputadas:
           monthly_income_imputed, annual_cost_imputed, admission_rate_imputed, duration_years_imputed
         
@@ -1715,7 +1718,13 @@ class FeatureEngineer:
             json.dump(self.config, f, indent=2)
     
     def run_pipeline(self) -> pd.DataFrame:
-        """Ejecuta pipeline completo."""
+        """Ejecuta pipeline de imputación y normalización.
+        
+        NOTA: RIASEC tagging es un paso SEPARADO que opera sobre las 554
+        carreras únicas (no sobre las 6.208 filas). Después de este pipeline,
+        se extraen unique careers → se etiquetan con Bedrock → se hace
+        join por `career` contra features_df para agregar `riasec_profile`.
+        """
         return (self
                 .create_imputation_flags()
                 .hierarchical_imputation()
@@ -1775,7 +1784,9 @@ class CareerFeature:
     """Carrera-Universidad individual con features normalizadas.
     
     Mapeo desde features.csv real (Ponte en Carrera).
-    `riasec_profile` se agrega vía join con tabla RIASEC (no viene en CSV crudo).
+    `riasec_profile` NO viene en el CSV crudo — se agrega vía join con una
+    tabla RIASEC de 554 carreras únicas (deduplicadas por `career`), etiquetadas
+    con Bedrock few-shot. El join se hace por la columna `career`.
     `management_type` (Pública/Privada) es distinto de `institution_type` (Universidad/Instituto).
     """
     
