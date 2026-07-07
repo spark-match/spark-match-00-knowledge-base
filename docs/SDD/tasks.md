@@ -2,7 +2,7 @@
 
 ## Descripción General
 
-La implementación avanza en cinco fases estrictamente incrementales sobre AWS, cada una dejando el sistema en un estado funcional, integrado y validado: primero se construye el pipeline de datos (`ingestion`, `data_clean`, `feature_engineering`) y el `ScoringEngine` determinístico como fundación aislada sin dependencias externas; luego se implementa el flujo conversacional completo (Bloques A/B/C, interpretación LLM vía Bedrock, sesión en memoria Fargate) como servicio funcional de punta a punta con fixtures locales; después se integra el backend híbrido real (Lambda stateless para `/session/create` y `/feedback`, Aurora PostgreSQL para persistencia, DynamoDB para georreferencia, JWT sin estado); luego se añaden capacidades secundarias opcionales (RAG con pgvector, embeddings Bedrock Titan, visualización de mapa); y finalmente se cierra con etiquetado RIASEC a escala completa (554 carreras únicas vía Bedrock batch + join a las 6,208 filas), tests de integración con fixtures reales, validación de propiedades de corrección y documentación final. Cada fase termina con un checkpoint explícito que verifica progreso integrado e inspecciona antes de continuar.
+La implementación avanza en cinco fases estrictamente incrementales sobre AWS, cada una dejando el sistema en un estado funcional, integrado y validado: primero se construye el pipeline de datos (`ingestion`, `data_clean`, `feature_engineering`) y el `ScoringEngine` determinístico como fundación aislada sin dependencias externas; luego se implementa el flujo conversacional completo (Bloques A/B/C, interpretación LLM vía Bedrock, sesión en memoria Fargate) como servicio funcional de punta a punta con fixtures locales; después se integra el backend híbrido real (Lambda stateless para `/session/create` y `/feedback`, Aurora PostgreSQL para persistencia, DynamoDB para georreferencia, sesión por `session_id` anónimo); luego se añaden capacidades secundarias opcionales (RAG con pgvector, embeddings Bedrock Titan, visualización de mapa); y finalmente se cierra con etiquetado RIASEC a escala completa (554 carreras únicas vía Bedrock batch + join a las 6,208 filas), tests de integración con fixtures reales, validación de propiedades de corrección y documentación final. Cada fase termina con un checkpoint explícito que verifica progreso integrado e inspecciona antes de continuar.
 
 ## Tareas
 
@@ -13,10 +13,12 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - Agregar dependencias con `uv add`:
       ```bash
       uv add "boto3>=1.28.0" "fastapi>=0.104.0" "uvicorn>=0.24.0" "pydantic>=2.0.0" "psycopg2-binary>=2.9.0" "pgvector>=0.1.8" "sqlalchemy>=2.0.0" "PyJWT>=2.8.0" "cryptography>=41.0.0" "python-dotenv>=1.0.0" "pandas>=2.0.0" "numpy>=1.24.0" "openpyxl>=3.10.0" "selenium>=4.15.0" "requests>=2.31.0" "moto>=4.2.0"
+      # NOTA: PyJWT y cryptography son opcionales para MVP (solo necesarios si se implementa JWT, tarea 16.O). Se incluyen por si el equipo decide activarlo.
       uv add --dev "pytest>=7.0.0" "pytest-asyncio>=0.21.0" "pytest-cov>=4.1.0"
       ```
     - `uv sync` genera `uv.lock` automáticamente.
-  - [ ] 1.3 Crear `.env.example` con variables de entorno: `AWS_REGION=us-east-1`, `LLM_PROVIDER=bedrock`, `LLM_MODEL=anthropic.claude-3-5-sonnet-20241022`, `EMBEDDING_PROVIDER=bedrock`, `EMBEDDING_MODEL=amazon.titan-embed-text-v2`, `AURORA_ENDPOINT=...`, `AURORA_PORT=5432`, `AURORA_USER=postgres`, `AURORA_PASSWORD=...`, `AURORA_DATABASE=careermatch`, `DYNAMODB_TABLE_UNIVERSITIES=universities`, `JWT_SECRET=...`, `JWT_ALGORITHM=HS256`, `SESSION_TIMEOUT_MINUTES=480`, `LOG_LEVEL=INFO`, `ENVIRONMENT=development`.
+  - [ ] 1.3 Crear `.env.example` con variables de entorno: `AWS_REGION=us-east-1`, `LLM_PROVIDER=bedrock`, `LLM_MODEL=anthropic.claude-3-5-sonnet-20241022`, `EMBEDDING_PROVIDER=bedrock`, `EMBEDDING_MODEL=amazon.titan-embed-text-v2`, `AURORA_ENDPOINT=...`, `AURORA_PORT=5432`, `AURORA_USER=postgres`, `AURORA_PASSWORD=...`, `AURORA_DATABASE=careermatch`, `DYNAMODB_TABLE_UNIVERSITIES=universities`, `SESSION_TIMEOUT_MINUTES=480`, `LOG_LEVEL=INFO`, `ENVIRONMENT=development`.
+    - NOTA: `JWT_SECRET`, `JWT_ALGORITHM` ya no son requeridas para MVP (se usa `session_id` anónimo). Si se implementa JWT (tarea 16.O opcional), agregarlas.
   - [ ] 1.4 Crear `pytest.ini` con configuración: `testpaths = tests`, `python_files = test_*.py`, `asyncio_mode = auto`, `addopts = --tb=short -v`, markers para `unit`, `integration`, `property`. Configurar `.coveragerc` con `source = backend, data_pipeline`, umbrales mínimos 60%.
   - [ ] 1.5 Crear `README.md` inicial con: descripción del proyecto, instrucciones de instalación (`uv sync`), guía de variables de entorno, estructura de directorios, fases de desarrollo, y comandos para ejecutar tests (`uv run pytest tests/ --cov`).
   - [ ] 1.6 Crear `Dockerfile` para servicio Fargate: imagen `python:3.10-slim`, instalar `uv` vía `COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/`, instalar dependencias de sistema (`gcc`, `postgresql-client`), copiar `pyproject.toml` y `uv.lock`, ejecutar `uv sync --no-dev`, exponer puerto 8000, healthcheck para `/health`, entrypoint `uv run uvicorn backend.app:app --host 0.0.0.0 --port 8000`.
@@ -470,7 +472,7 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
 
 ---
 
-## Fase 3 — Backend Híbrido y Persistencia (Alta): Lambda, Aurora, DynamoDB, JWT Integrados
+## Fase 3 — Backend Híbrido y Persistencia (Alta): Lambda, Aurora, DynamoDB, Sesión Anónima
 
 - [ ] 13. Configurar Infraestructura AWS Base
   - [ ] 13.1 Crear tabla Aurora PostgreSQL vía AWS Console o AWS CLI:
@@ -563,37 +565,40 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - Verifica que `get_feedback_by_session` no retorna registros de otra sesión.
     - Verifica que DB error dispara fallback queue local.
 
-- [ ] 16. Implementar `backend/lambda/auth_service.py` — Auth_Service (JWT)
+- [ ] 16. Implementar `backend/auth.py` — Auth_Service (session_id anónimo, JWT opcional)
   - [ ] 16.1 Implementar clase `AuthService`:
-    - Constructor: almacena `self.secret = os.getenv("JWT_SECRET")`, `self.algorithm = os.getenv("JWT_ALGORITHM", "HS256")`, `self.timeout_minutes = int(os.getenv("SESSION_TIMEOUT_MINUTES", 480))`.
-    - Almacena tokens activos en dict en-memoria (Fase 3 demo): `self._active_tokens = {}`.
+    - Constructor: `self.timeout_minutes = int(os.getenv("SESSION_TIMEOUT_MINUTES", 480))`.
+    - Almacena sesiones activas en dict en-memoria: `self._active_sessions = {}`.
   - [ ] 16.2 Implementar método `create_session(self) -> dict`:
     - Genera `session_id = str(uuid.uuid4())`.
-    - Crea JWT con payload `{session_id, exp: now + timeout_minutes, iat: now}`.
-    - Firma con `JWT_SECRET` y `HS256`.
-    - Almacena en `self._active_tokens[session_token] = session_id` (para validate rápido).
-    - Retorna `{session_id, session_token}`.
+    - Almacena en `self._active_sessions[session_id] = {"created_at": time.time()}`.
+    - Retorna `{"session_id": session_id, "session_token": session_id}` (token = propio session_id).
+    - NOTA: Para MVP el token es el mismo session_id (UUID v4). Si se requiere JWT en futuro, ver tarea 16.O.
     _Requerimientos: 8.3_
   - [ ] 16.3 Implementar método `validate_token(self, session_token: str) -> str | None`:
-    - Intenta decodificar JWT con `jwt.decode(session_token, self.secret, algorithms=[self.algorithm])`.
-    - Si válido: extrae `session_id` del payload, retorna.
-    - Si inválido (firma, expiración): loguea, retorna None.
-    - Lanza `InvalidTokenError` (custom exception) si token malformado.
+    - Verifica que `session_token` existe en `self._active_sessions`.
+    - Verifica TTL: si expirado, elimina y retorna None.
+    - Si válido: retorna `session_id`.
+    - Loguea auditoría: `"Session validated: {session_id}"`.
     _Requerimientos: 8.3_
-  - [ ] 16.4 Implementar método `revoke_token(self, session_token: str) -> None`:
-    - Marca token como revocado (elimina de `_active_tokens`).
-    - Loguea auditoría.
-  - [ ] 16.5 Tests: `test_auth_service.py`:
-    - Verifica token válido: decodifica correctamente.
-    - Verifica token expirado: `validate_token` retorna None (no exception).
-    - Verifica token con firma incorrecta: `InvalidTokenError`.
-    - Verifica revocación: token revocado → None en siguiente validación.
+  - [ ] (Opcional) 16.O Auth con JWT:
+    - Implementar método `create_jwt_session()` que genera JWT firmado con `JWT_SECRET` y algoritmo `JWT_ALGORITHM`.
+    - Requiere variables `JWT_SECRET`, `JWT_ALGORITHM` en `.env`.
+    - `validate_token` decodifica JWT en lugar de lookup en diccionario.
+    - Tests: token válido, expirado, firma incorrecta, revocación.
+    - NOTA: Google OAuth puede integrarse como extensión futura si se requiere identidad de usuario.
+  - [ ] 16.4 Tests: `test_auth_service.py`:
+    - Verifica `create_session()` retorna session_id y session_token no nulos.
+    - Verifica `validate_token()` con token válido retorna session_id correcto.
+    - Verifica expiración por TTL: token expirado retorna None.
+    - Verifica token inválido (uuid inexistente) retorna None.
 
-- [ ] 17. Implementar `backend/lambda/session_handler.py` y `feedback_handler.py` — Lambda Handlers
-  - [ ] 17.1 Implementar `session_handler.lambda_handler(event, context)`:
-    - Evento API Gateway: `{httpMethod: "POST", path: "/session/create", ...}`.
+- [ ] 17. Implementar `backend/lambda/feedback_handler.py` — Lambda Feedback Handler
+  - [ ] (Opcional) 17.1 Implementar `session_handler.lambda_handler(event, context)`:
+    - Handler para API Gateway `POST /session/create`.
     - Invoca `auth_service.create_session()`.
-    - Retorna response: `{statusCode: 200, body: json.dumps({session_id, session_token})}`.
+    - Retorna `{statusCode: 200, body: json.dumps({session_id, session_token})}`.
+    - NOTA: Solo necesario si se separa en Lambda la creación de sesión. Para MVP con sesión anónima, la creación se hace inline en `app.py` startup (ver tarea 11.5).
     _Requerimientos: 8.1_
   - [ ] 17.2 Implementar `feedback_handler.lambda_handler(event, context)`:
     - Evento API Gateway: `{httpMethod: "POST", path: "/feedback", body: json_string}`.
@@ -609,20 +614,25 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - Verifica `/feedback` rechaza score fuera de rango (422).
     - Verifica `/feedback` rechaza token inválido (401).
 
-- [ ] 18. Integrar JWT en `/chat` Endpoint
+- [ ] 18. Integrar Sesión Anónima en `/chat` Endpoint
   - [ ] 18.1 Modificar `backend/app.py` endpoint `POST /chat`:
     - Extrae token del header `Authorization: Bearer {token}`.
     - Invoca `auth_service.validate_token(token)` → obtiene `session_id`.
     - Si token inválido: retorna HTTP 401.
     - Invoca `orchestration.handle_turn(session_id, message, metadata)` (como antes).
+    - NOTA: Para MVP el token es el propio `session_id` (UUID v4), no JWT. La validación es lookup en diccionario en-memoria.
     _Requerimientos: 8.3_
   - [ ] 18.2 Modificar `backend/orchestration.py` método `handle_turn`:
     - Al generar ranking: invoca `feedback_storage.save_ranking(session_id, ranking_json, metadata)`.
     - Guarda `ranking_id` en contexto y retorna en respuesta JSON (para futura validación).
     _Requerimientos: 9.1_
+  - [ ] (Opcional) 18.O Integrar JWT como alternativa:
+    - Modificar `app.py` para usar `auth_service.create_jwt_session()` si `JWT_SECRET` está definido.
+    - `validate_token` decodifica JWT en lugar de lookup en diccionario.
+    - Tests de integración JWT: `/session/create` → obtiene JWT → `/chat` con JWT → ranking.
   - [ ] 18.3 Tests de integración: `test_auth_persistence_integration.py`:
-    - Flujo: `/session/create` → obtiene token.
-    - `/chat` con token válido → genera ranking → persiste en Aurora.
+    - Flujo: `auth_service.create_session()` → obtiene session_id.
+    - `/chat` con token (session_id) válido → genera ranking → persiste en Aurora.
     - `/feedback` con ranking_id → guarda validación.
     - Verifica datos persistidos en Aurora.
 
@@ -649,8 +659,8 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
   - [ ] 20.1 Ejecutar flujo completo contra recursos mockeados:
     - Postgres local (docker-compose) en lugar de Aurora.
     - DynamoDB mockeado con `moto`.
-    - `/session/create` → obtiene token JWT válido.
-    - `/chat` con token → conversa 2–4 turnos → ranking generado.
+    - `auth_service.create_session()` → obtiene session_id anónimo (UUID v4).
+    - `/chat` con session_id → conversa 2–4 turnos → ranking generado.
     - `/feedback` con ranking_id y score válido → persistido en Postgres.
     - `/universities` → retorna lista, filtrado por location.
   - [ ] 20.2 Verificar aislamiento por `session_id`:
@@ -928,7 +938,9 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
   - Embeddings: ÚNICAMENTE Bedrock Titan (NO sentence-transformers local, NO OpenAI).
   - Vector DB: ÚNICAMENTE pgvector en Aurora (NO FAISS local, NO Pinecone, NO Chroma).
 
-- **Sesión conversacional**: Vive **en memoria dentro del proceso Fargate** con TTL simple (1800s), decisión explícita para demo. NO introduce Redis ni DynamoDB para sesiones. JWT es stateless para que Lambda y Fargate NO dependan de almacén compartido.
+- **Sesión conversacional**: Vive **en memoria dentro del proceso Fargate** con TTL simple (1800s), decisión explícita para demo. NO introduce Redis ni DynamoDB para sesiones.
+
+- **Autenticación simplificada (2.2)**: Para el MVP se usa `session_id` anónimo (UUID v4) como token, sin JWT ni Lambda para creación de sesión. JWT queda como alternativa opcional (tarea 16.O) para cuando se necesite autenticación stateless entre Lambda y Fargate. La autenticación JWT y el handler Lambda `/session/create` quedan como tareas opcionales (16.O, 17.1, 18.O) para cuando se requiera identidad de usuario. Google OAuth es una extensión futura posible. El backend existente de Angel (con Identity completo) deberá reconciliarse antes de adoptar JWT en producción — ver `OBSERVACIONES_tasks.md` § Alineación de stack.
 
 - **Etiquetado RIASEC** (6,208 carreras): Corre como **job batch** (AWS Batch o Fargate task, NO Lambda) por duración de llamadas Bedrock (potencialmente horas). Pipeline automatizado genera snapshot versionado. Validación muestral (300 carreras) es paso humano externo, pero export CSV es responsabilidad pipeline (tarea 25.2).
 

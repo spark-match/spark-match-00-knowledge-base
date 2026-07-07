@@ -1,5 +1,8 @@
 # design.md — CareerMatch Perú (Consolidado, foco AWS)
 
+> **⚠️ PENDIENTE: Definir fuente de verdad del stack backend.**  
+> El backend de Angel (rama `feature/scaffolding-fase-1`) usa **TypeScript + Lambda + Identity completo (register/login/JWT)**, mientras que este documento asume **Python + Fargate + sesión anónima**. Ambos coexisten en el repo. **NO editar las secciones de Auth/JWT de este documento** hasta que el equipo decida qué stack adoptar. Ver `OBSERVACIONES_tasks.md` § Alineación de stack para contexto.
+
 ## 1. Descripción General
 
 **CareerMatch Perú** es un sistema de recomendación de carreras universitarias que opera mediante un asistente conversacional basado en LLM, integrado con un motor de evaluación multi-criterio determinístico y auditable. El flujo principal es:
