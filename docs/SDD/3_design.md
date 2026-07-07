@@ -2,23 +2,23 @@
 
 ## 1. Descripción General
 
-**CareerMatch Perú** es un sistema de recomendación de carreras universitarias que opera mediante un asistente conversacional basado en LLM, integrado con un motor de evaluación multi-criterio determinístico y auditable. El flujo principal es:
+**CareerMatch Perú** es un sistema de recomendación de carreras universitarias que opera mediante coreografía de eventos entre contextos serverless. El flujo principal es:
 
-1. Usuario inicia sesión autenticada vía JWT.
-2. Expresa preferencias en lenguaje natural a través de interfaz web conversacional.
-3. El **LLM_Layer** (Amazon Bedrock/Claude) interpreta preferencias y detecta información incompleta en 3 bloques:
+1. Usuario inicia sesión autenticada vía JWT (Identity Context, TypeScript/Lambda).
+2. Expresa preferencias en lenguaje natural a través del AI Advisor (servicio Python separado, repo `08-deep-agent`).
+3. El **Assessment Context** (TypeScript/Lambda) interpreta preferencias en 3 bloques mediante el AI Advisor (Bedrock/Claude):
    - **Bloque A**: RIASEC (6 dimensiones Holland)
    - **Bloque B**: Pesos dinámicos (5 criterios: afinidad, ingreso, costo, admisión, duración)
    - **Bloque C**: Filtros duros (región, tipo institución, presupuesto, modalidad)
-4. Si falta información, el sistema genera preguntas contextuales iterativamente hasta alcanzar confianza ≥ 0.70 o máximo 4 repreguntas.
-5. Una vez interpretadas, el **Scoring_Engine** calcula indicadores de concordancia multi-criterio para todas las combinaciones carrera–universidad, ordena por score descendente y retorna **Top-5**.
-6. El **LLM_Layer** redacta explicaciones personalizadas.
-7. El usuario valida con escala Likert y la sesión se persiste en **Feedback_Storage** para análisis futuro.
+4. Al completar la interpretación, Assessment Context emite un evento **AssessmentCompleted** a EventBridge.
+5. **Matching Context** (Python 3.12 Lambda) consume el evento, ejecuta el **Scoring_Engine** para calcular concordancia multi-criterio, ordena por score descendente, retorna **Top-5** y emite **RecommendationGenerated**.
+6. **AI Advisor** consume **RecommendationGenerated**, redacta explicaciones personalizadas vía LLM (Bedrock/Claude) y las presenta al usuario.
+7. El usuario valida con escala Likert y el feedback se persiste mediante Lambda handler asíncrono en EventBridge.
 
 **Énfasis en:**
 - **Determinismo**: Cualquier input idéntico genera ranking idéntico en 100% de ejecuciones.
 - **Reproducibilidad**: Snapshots versionados permiten auditar exactamente qué datos y configuración se usó.
-- **Aislamiento de datos** por `session_id`.
+- **Aislamiento de datos** por `userId` (JWT sub claim).
 - **Degradación controlada**: Si componentes fallan, el sistema retorna la mejor respuesta posible con información disponible.
 - **Arquitectura serverless multi-contexto**: API Gateway v2 (HTTP) enruta a Lambdas por contexto de negocio. El chat conversacional es un servicio Python separado (repo `08-deep-agent`). Matching Context (scoring) + Data Pipeline son el alcance de este documento. Ver [`docs/SDD/tasks.md`] y ADR-001 (decisión real que descarta Fargate).
 
@@ -119,17 +119,17 @@ El diseño original planteaba Fargate para el chat porque "Lambda no es adecuado
 | | 6.2 Etiquetado Bedrock few-shot | `tag_careers_with_bedrock` |
 | | 6.3 Validación muestral 300 carreras | `validate_sample` → CSV |
 | | 6.4 Fallback familia | `apply_family_fallback` |
-| **R7 — LLM** | 7.1 Interpretación Bloques A/B/C | `LLMLayer.interpret_*` |
-| | 7.2 Validación JSON 3 reintentos | `_parse_and_validate_json` |
-| | 7.3 Generación explicaciones | `generate_explanation` |
-| **R8 — Backend** | 8.1 Lambda `/session`, `/feedback`, `/universities` | 3 handlers |
-| | 8.2 Lambda `/v1/matching/score` + EventBridge output | `Orchestrator.handle_turn` |
+| **R7 — LLM** | 7.1 Interpretación Bloques A/B/C | `AI Advisor` (repo `08-deep-agent`, FastAPI + LangGraph) |
+| | 7.2 Validación JSON 3 reintentos | `AI Advisor._parse_and_validate_json` |
+| | 7.3 Generación explicaciones | `AI Advisor.generate_explanation` |
+| **R8 — Backend** | 8.1 Lambda `/feedback` + `/universities` | 2 handlers (Matching Context) |
+| | 8.2 Lambda `matching/handle_completed` + EventBridge I/O | `ScoringEngine.rank_and_filter` reactivo |
 | | 8.3 JWT sin estado compartido | JWT validado en API Gateway v2 (edge) + Powertools en cada Lambda |
 | **R9 — Persistencia** | 9.1 Aurora: feedback, rankings aislados | `FeedbackRecord` + índices |
 | | 9.2 pgvector Aurora: career_chunks | `career_chunks` tabla |
 | | 9.3 DynamoDB: universities + GSI location-index | `universities` tabla |
 | **R10 — No funcionales** | 10.1 Scoring 6k+ combos en ≤ 1s | Benchmark test |
-| | 10.2 Aislamiento por `session_id` | Queries filtrando siempre |
+| | 10.2 Aislamiento por `userId` | Queries filtrando siempre por JWT sub |
 | | 10.3 Fallback templado si fallan componentes | Degradación controlada |
 | | 10.4 Logging sin PII | No tokens completos, nombres OK |
 
@@ -242,6 +242,8 @@ class EmbeddingService:
 ---
 
 ### `backend/llm_service.py` — LLM_Layer (Amazon Bedrock Claude-3.5-Sonnet)
+
+> **NOTA:** Este módulo vive en el AI Advisor (repo `08-deep-agent`, FastAPI + LangGraph), NO en el Matching Context. Se documenta aquí como referencia de diseño pero su implementación está fuera del alcance de este repositorio.
 
 **Responsabilidad:** Interpretar preferencias en lenguaje natural mediante Claude, detectar información incompleta, generar preguntas y explicaciones.
 
@@ -860,7 +862,7 @@ class FeedbackStorage:
     
     def save_ranking(
         self,
-        session_id: str,
+        user_id: str,
         user_input: str,
         profile_interpreted: dict,
         weights_generated: dict,
@@ -871,7 +873,7 @@ class FeedbackStorage:
         Guarda ranking generado (sin validación usuario aún).
         
         Args:
-            session_id: ID única de sesión
+            user_id: sub del JWT (Identity Context)
             user_input: Consulta original del usuario
             profile_interpreted: Perfil interpretado (JSON)
             weights_generated: Pesos dinámicos
@@ -884,7 +886,7 @@ class FeedbackStorage:
         Comportamiento:
         - Inserta en tabla rankings:
           INSERT INTO rankings 
-          (session_id, ranking_json, reproducibility_metadata, created_at)
+          (user_id, ranking_json, reproducibility_metadata, created_at)
           VALUES (?, ?, ?, ?)
         
         ranking_json contiene: {profile, weights, top_5_items}
@@ -905,6 +907,7 @@ class FeedbackStorage:
     def update_validation(
         self,
         ranking_id: str,
+        user_id: str,
         validation_score: int,  # [1, 5]
         selected_career: str | None = None,
         notes: str | None = None,
@@ -915,6 +918,7 @@ class FeedbackStorage:
         
         Args:
             ranking_id: ID del ranking a actualizar
+            user_id: sub del JWT (para verificar propiedad)
             validation_score: Escala Likert 1–5
             selected_career: Carrera elegida por usuario (opcional)
             notes: Comentarios libres (opcional)
@@ -922,6 +926,7 @@ class FeedbackStorage:
         
         Comportamiento:
         - Localiza ranking por ranking_id en tabla rankings
+        - Verifica que ranking.user_id == user_id (security: no validar ranking ajeno)
         - Actualiza campos en JSONB ranking_json:
           ranking_json['user_validation'] = {
               score: validation_score,
@@ -929,11 +934,11 @@ class FeedbackStorage:
               notes: notes,
               timestamp: timestamp
           }
-        - UPDATE rankings SET ranking_json = ? WHERE id = ?
+        - UPDATE rankings SET ranking_json = ? WHERE id = ? AND user_id = ?
         
         Validaciones:
         - validation_score ∈ [1, 5]; si fuera: ValueError
-        - ranking_id debe existir; si no: ValueError
+        - ranking_id debe existir y pertenecer a user_id; si no: ValueError
         
         Timeout:
         - Máximo 5 segundos (incluye retry)
@@ -957,7 +962,7 @@ class FeedbackStorage:
         - Retorna JSONB completo deserializado
         
         Notas:
-        - No expone datos de otros usuarios (aislamiento garantizado por WHERE session_id)
+        - No expone datos de otros usuarios (aislamiento garantizado por WHERE user_id)
         """
     
     def query_feedback_aggregated(
@@ -1004,407 +1009,247 @@ class FeedbackStorage:
 ```
 
 **Notas de comportamiento:**
-- Aislamiento: queries filtran implícitamente por `session_id` en contexto de seguridad.
+- Aislamiento: queries filtran implícitamente por `user_id` (JWT sub) en contexto de seguridad.
 - Fallback: si DB no disponible, queue local persiste en memoria hasta sincronizar.
-- Schema: índices en (session_id, ranking_id, career) para queries rápidas.
+- Schema: índices en (user_id, ranking_id, career) para queries rápidas.
 
 ---
 
-### `backend/orchestration.py` — Orchestration_Layer
+### Event Schemas (cross-context, EDA)
 
-**Responsabilidad:** Orquestar flujo completo: autenticación → interpretación (Bloques A/B/C) → evaluación → explicación → persistencia. Manejar errores y fallback.
+La comunicación entre contextos usa eventos en EventBridge (`spark-match-events`). No existe una clase `Orchestration` monolítica; cada contexto reacciona a eventos de forma autónoma (coreografía).
 
-**API Pública:**
+#### `AssessmentCompleted` (Assessment Context → EventBridge)
+
+Emitido por Assessment Context (TypeScript/Lambda) cuando completa la interpretación de preferencias del usuario.
+
+```json
+{
+  "source": "careermatch.assessment",
+  "detail-type": "AssessmentCompleted",
+  "detail": {
+    "userId": "uuid-del-usuario",
+    "sessionId": "uuid-de-sesion",
+    "riasec_scores": { "R": 8, "I": 9, "A": 7, "S": 6, "E": 5, "C": 4 },
+    "weights": { "w_afinidad": 0.3, "w_ingreso": 0.25, "w_costo": 0.2, "w_admision": 0.15, "w_duracion": 0.1 },
+    "filters": {
+      "location": "Lima",
+      "management_type": "publica",
+      "presupuesto_max": 5000,
+      "modalidad": "presencial"
+    },
+    "confidence": 0.85,
+    "timestamp": "2026-07-07T12:00:00Z"
+  }
+}
+```
+
+#### `RecommendationGenerated` (Matching Context → EventBridge)
+
+Emitido por Matching Context después de procesar `AssessmentCompleted`.
+
+```json
+{
+  "source": "careermatch.matching",
+  "detail-type": "RecommendationGenerated",
+  "detail": {
+    "userId": "uuid-del-usuario",
+    "sessionId": "uuid-de-sesion",
+    "rankingId": "uuid-del-ranking",
+    "top_5": [
+      {
+        "rank": 1,
+        "career": "Estadística",
+        "institution": "UNMSM",
+        "concordancia_score": 0.847,
+        "scores_by_criterion": {
+          "afinidad": 0.85,
+          "ingreso": 0.82,
+          "costo": 0.90,
+          "admision": 0.60,
+          "duracion": 0.75
+        }
+      }
+    ],
+    "snapshot_id": "features_20260715_143022",
+    "timestamp": "2026-07-07T12:00:05Z"
+  }
+}
+```
+
+### Coreografía de Eventos (reemplaza Orchestration.handle_turn)
+
+```
+[Assessment Context]                   [Matching Context]                 [AI Advisor]
+       │                                      │                               │
+       │— Interpreta preferencias              │                               │
+       │  (vía AI Advisor API)                 │                               │
+       │                                      │                               │
+       │──emite AssessmentCompleted─────────> │                               │
+       │                                      │                               │
+       │                                      │— Consume evento               │
+       │                                      │— Ejecuta ScoringEngine        │
+       │                                      │— Persiste Ranking             │
+       │                                      │— Emite RecommendationGenerated│
+       │                                      │                               │
+       │                                      │──────────────────────────────>│
+       │                                      │                               │— Consume evento
+       │                                      │                               │— Redacta explicaciones vía LLM
+       │                                      │                               │— Presenta al usuario
+```
+
+### `backend/lambda/matching_handler.py` — ScoringEngine como Lambda Reactivo
+
+**Responsabilidad:** Reaccionar al evento `AssessmentCompleted` desde EventBridge, ejecutar scoring determinístico, persistir ranking, emitir `RecommendationGenerated`.
 
 ```python
-class Orchestration:
-    def __init__(
-        self,
-        auth_service,
-        session_manager,
-        llm_service,
-        scoring_engine,
-        rag_module,
-        feedback_storage,
-    ):
-        """Inyecta todas las dependencias del sistema."""
+def lambda_handler(event: dict, context: object) -> dict:
+    """
+    Lambda handler suscrito a EventBridge (spark-match-events).
+    Trigger: detail-type = "AssessmentCompleted".
     
-    def handle_chat(
-        self,
-        session_token: str,
-        message: str,
-        metadata: dict | None = None,
-    ) -> dict:
-        """
-        Maneja solicitud de chat completa (entrypoint principal).
-        
-        Args:
-            session_token: Token de sesión (validado por HTTP layer)
-            message: Mensaje del usuario en español
-            metadata: Filtros opcionales {location, budget_max (presupuesto anual), management_type}
-        
-        Returns:
-            ChatResponse:
-            {
-                "status": "success" | "error",
-                "conversation": {
-                    "turn": int,
-                    "bot_message": str,
-                    "requires_follow_up": bool
-                },
-                "ranking": {
-                    "status": "ready" | "awaiting_info",
-                    "top_5": [
-                        {
-                            "rank": 1,
-                            "id": str,
-                            "career": str,
-                            "institution": str,
-                            "concordancia_score": float,
-                            "monthly_income_imputed": float,
-                            "annual_cost_imputed": float,
-                            "admission_rate_imputed": float,
-                            "duration_years_imputed": float,
-                            "explanation": str
-                        },
-                        ...
-                    ]
-                },
-                "rag_available_for": list[str],
-                "ranking_id": str | None,
-                "error_message": str | None
-            }
-        
-        Flujo detallado:
-        
-        1. VALIDAR TOKEN
-           auth_service.validate_token(session_token)
-           → Si inválido: retorna {status: "error", error_message: "Token inválido"}
-        
-        2. RECUPERAR SESIÓN
-           context = session_manager.get_context(session_id)
-           → Si no existe: crear nuevo vacío
-           → Agregar message a conversation_history
-        
-        3. DETERMINAR BLOQUE ACTIVO
-           - Si riasec_scores incompleto: BLOQUE A
-           - Elif pesos no priorizados: BLOQUE B
-           - Elif filtros no definidos: BLOQUE C
-           - Else: proceder a SCORING
-        
-        4. INTERPRETAR BLOQUE ACTIVO
-           Si BLOQUE A:
-               result_a = llm_service.interpret_bloque_a(message, history)
-               Actualizar profile.riasec_scores con result_a
-               Recalcular profile.riasec_code
-           
-           Si BLOQUE B:
-               result_b = llm_service.interpret_bloque_b(message, history)
-               Si result_b['priority_order']: 
-                   weights = calculate_weights_from_ranking(result_b['priority_order'])
-                   Actualizar profile.w_*, validar con validate_weights()
-               Elif result_b['explicit_weights']:
-                   Actualizar profile.w_*, validar
-           
-           Si BLOQUE C:
-               result_c = llm_service.interpret_bloque_c(message, history)
-                Actualizar profile.location, management_type, presupuesto_max, modalidad
-        
-        5. ACTUALIZAR CONTEXTO Y CALCULAR CONFIANZA
-           session_manager.update_profile(session_id, nuevos_datos)
-           confidence = session_manager.calculate_confidence(profile)
-           Incrementar turn_count
-        
-        6. EVALUAR AVANCE
-           
-           IF confidence >= 0.70:
-               → Proceder a SCORING
-           
-           ELIF turn_count >= 4:
-               → Proceder a SCORING (degradación controlada)
-               → Loguar {graceful_degradation: true}
-           
-           ELSE:
-               → Generar pregunta seguimiento
-               → Retornar {status: "success", requires_follow_up: true, bot_message: "¿...?"}
-        
-        7. SCORING (si avanza)
-           
-           a. Calcular afinidades:
-              affinity_scores = [
-                  scoring_engine.calculate_affinity(profile.riasec_code, carrera['riasec_profile'])
-                  for carrera in features_df
-              ]
-           
-           b. Calcular ranking completo:
-              ranked = scoring_engine.rank_and_filter(profile, features_df)
-           
-           c. Extraer Top-5:
-              top_5 = scoring_engine.get_top_n(ranked, 5)
-           
-           d. Generar explicaciones:
-              for item in top_5:
-                  explanation = llm_service.generate_explanation(
-                      rank=item['rank'],
-                      career=item['career'],
-                      institution=item['institution'],
-                      score=item['concordancia_score'],
-                      scores_by_criterion=item['scores_by_criterion'],
-                      user_profile=profile,
-                      verifiable_data=item['verifiable_data']
-                  )
-                  item['explanation'] = explanation
-           
-           e. Persistir:
-              ranking_id = feedback_storage.save_ranking(
-                  session_id,
-                  user_input=message,
-                  profile_interpreted=profile.to_dict(),
-                  weights_generated=profile.weights_dict(),
-                  ranking_generated=top_5,
-                  timestamp=now()
-              )
-           
-            f. Obtener carreras con RAG:
-               rag_available = [
-                   item['career'] for item in top_5
-                   if rag_module.is_career_available(item['career'])
-               ]
-           
-           g. Retornar:
-              {
-                  "status": "success",
-                  "conversation": {bot_message: "Te recomendamos...", requires_follow_up: false},
-                  "ranking": {status: "ready", top_5: top_5},
-                  "rag_available_for": rag_available,
-                  "ranking_id": ranking_id
-              }
-        
-        Manejo de errores:
-        - LLM interpreta inválido (3 reintentos): continúa con lo que tiene, incrementa turn_count
-        - Scoring falla (features_df vacío): retorna error HTTP 500
-        - Embedding falla (para afinidad): afinidad = 0.5 (fallback)
-        - Feedback persist falla: queue local, continúa
-        
-        Timeout:
-        - Total máximo 8 segundos (incluye LLM, scoring, persistencia)
-        """
+    Flujo:
+    1. Parsear detail del evento → perfil (riasec_scores, weights, filters, userId)
+    2. Cargar features.csv desde snapshot (S3)
+    3. Calcular código RIASEC: calculate_riasec_code(riasec_scores)
+    4. Aplicar filtros duros (location, management_type, presupuesto_max, modalidad)
+    5. Para cada fila: calcular afinidad + score
+    6. Ordenar por score DESC, desempatar alfabéticamente por institution
+    7. Truncar a Top-5
+    8. Persistir ranking en Aurora PostgreSQL (ranking_id UUID)
+    9. Emitir RecommendationGenerated a EventBridge:
+       {
+           "source": "careermatch.matching",
+           "detail-type": "RecommendationGenerated",
+           "detail": { userId, sessionId, rankingId, top_5, snapshot_id, timestamp }
+       }
+    10. Retornar {statusCode: 200}
     
-    def handle_feedback(
-        self,
-        session_token: str,
-        ranking_id: str,
-        validation_score: int,
-        selected_career: str | None = None,
-        notes: str | None = None,
-    ) -> dict:
-        """
-        Maneja validación del usuario.
-        
-        Args:
-            session_token: Token validado
-            ranking_id: ID del ranking a validar
-            validation_score: Escala Likert 1–5
-            selected_career, notes: Opcionales
-        
-        Returns:
-            {
-                "status": "success" | "error",
-                "message": str
-            }
-        
-        Lógica:
-        1. Validar score ∈ [1, 5]
-           → Si no: retorna {status: "error", message: "Score inválido"}
-        
-        2. Verificar que ranking_id pertenece a session_id
-           (security: usuario no puede validar ranking de otro)
-           ranking = feedback_storage.get_ranking_by_id(ranking_id)
-           → Si ranking.session_id ≠ session_id: error
-        
-        3. Persistir validación:
-           feedback_storage.update_validation(
-               ranking_id,
-               validation_score,
-               selected_career,
-               notes,
-               timestamp=now()
-           )
-        
-        4. Retornar éxito
-        """
+    Manejo de errores:
+    - Si features.csv no disponible: loguea error, no emite evento
+    - Si Aurora caído: queue local + reintento
+    - Si parse inválido: loguea, retorna error estructurado
+    """
+    pass  # Implementación en tasks.md Tarea 10.x
+```
+
+### `backend/lambda/feedback_handler.py` — Feedback Persistence Handler
+
+**Responsabilidad:** Persistir validación del usuario (Likert 1–5) en Aurora PostgreSQL. Invocado por API Gateway v2 (ruta `POST /feedback`).
+
+```python
+def lambda_handler(event: dict, context: object) -> dict:
+    """
+    Lambda handler para POST /feedback.
     
-    def handle_rag_query(
-        self,
-        session_token: str,
-        career: str,
-        question: str,
-    ) -> dict:
-        """
-        Maneja consulta RAG sobre detalles de carrera.
-        
-        Args:
-            session_token: Token validado
-            career: Nombre de carrera recomendada
-            question: Pregunta del usuario
-        
-        Returns:
-            {
-                "status": "success" | "no_documents" | "error",
-                "answer": str,
-                "sources": list[str],
-                "confidence": float
-            }
-        
-        Lógica:
-        1. Verificar que career está en ranking previo del usuario
-           (security: usuario no puede consultar carreras random)
-           session_context = session_manager.get_context(session_id)
-           → Si ranking_history vacío o career no está: error
-        
-        2. Invocar RAG:
-           response = rag_module.query(career, question, top_k=3)
-        
-        3. Retornar respuesta (incluso si status="no_documents")
-        """
+    Flujo:
+    1. Extraer JWT del header Authorization
+    2. Validar JWT (PyJWT.decode con secreto compartido)
+    3. Parsear body: { rankingId, validationScore, selectedCareer, notes }
+    4. Validar validationScore ∈ [1, 5]
+    5. Persistir en Aurora (tabla feedback)
+    6. Retornar {statusCode: 200, body: {status: "success"}}
+    
+    Errores:
+    - 401 si JWT inválido
+    - 422 si validationScore fuera de rango
+    - 500 si DB error
+    """
+    pass
 ```
 
 **Notas de comportamiento:**
-- Orchestration **NO lanza excepciones** al caller; retorna respuestas estructuradas con status.
-- Errores loguedos completamente (para auditoría, sin PII).
-- Fallbacks permiten degradación controlada en cada paso.
+- No existe clase `Orchestration` monolítica; la coordinación es vía eventos.
+- `ScoringEngine` se ejecuta como Lambda handler asíncrono (no en el mismo request HTTP).
+- Feedback persistence se maneja en Lambda dedicado (no en el flujo de chat).
+- El chat conversacional y la interpretación LLM viven en AI Advisor (repo `08-deep-agent`).
 
 ---
 
 ### `backend/app.py` — FastAPI Entrypoint (desarrollo local Matching Context)
 
+> **NOTA:** Este entrypoint es solo para desarrollo local del Matching Context. En producción, los handlers son Lambdas individuales invocados por API Gateway v2. El endpoint `/chat` vive en el AI Advisor (repo `08-deep-agent`).
+
 ```python
-from fastapi import FastAPI, HTTPException, Depends, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException
 import logging
 
-app = FastAPI(title="CareerMatch Perú Agent API")
+app = FastAPI(title="CareerMatch Perú — Matching Context (local dev)")
 logger = logging.getLogger("careermatch")
 
 # Variable global (inicializada en startup)
-orchestration = None
+scoring_engine = None
 
-def get_session_token(request: Request) -> str:
-    """Extrae session_token del header Authorization."""
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Authorization header requerido")
-    return auth_header[7:]
-
-@app.post("/chat")
-async def endpoint_chat(
-    request: dict,  # {message, metadata}
-    session_token: str = Depends(get_session_token),
+@app.post("/v1/matching/score")
+async def endpoint_score(
+    request: dict,  # {riasec_scores, weights, filters, userId}
 ) -> dict:
     """
-    POST /chat
+    POST /v1/matching/score
     
-    Delega a orchestration.handle_chat() y retorna respuesta.
-    HTTP 200 siempre (status en JSON), 401 si token inválido.
+    Simula localmente lo que el Lambda matching_handler hace en producción.
+    Recibe perfil completo, ejecuta ScoringEngine, retorna Top-5.
+    HTTP 200 con ranking, 500 si error interno.
     """
     try:
-        response = orchestration.handle_chat(
-            session_token,
-            request.get("message"),
-            request.get("metadata")
+        profile = StudentProfile(
+            riasec_scores=request.get("riasec_scores"),
+            w_afinidad=request["weights"].get("w_afinidad"),
+            w_ingreso=request["weights"].get("w_ingreso"),
+            w_costo=request["weights"].get("w_costo"),
+            w_admision=request["weights"].get("w_admision"),
+            w_duracion=request["weights"].get("w_duracion"),
+            location=request["filters"].get("location"),
+            management_type=request["filters"].get("management_type"),
+            presupuesto_max=request["filters"].get("presupuesto_max"),
+            modalidad=request["filters"].get("modalidad"),
         )
-        return response
+        ranked = scoring_engine.rank_and_filter(profile, scoring_engine.features_df)
+        top_5 = scoring_engine.get_top_n(ranked, 5)
+        return {"status": "success", "top_5": top_5}
     except Exception as e:
-        logger.error(f"Error en /chat: {e}", exc_info=True)
+        logger.error(f"Error en /score: {e}", exc_info=True)
         return {"status": "error", "error_message": "Error interno del servidor"}
 
-@app.post("/feedback")
-async def endpoint_feedback(
-    request: dict,  # {ranking_id, validation_score, ...}
-    session_token: str = Depends(get_session_token),
-) -> dict:
-    """
-    POST /feedback
-    
-    Delega a orchestration.handle_feedback().
-    HTTP 422 si validation_score fuera de rango.
-    """
-    try:
-        score = request.get("validation_score")
-        if not (1 <= score <= 5):
-            raise HTTPException(status_code=422, detail="Score debe estar entre 1 y 5")
-        
-        response = orchestration.handle_feedback(
-            session_token,
-            request.get("ranking_id"),
-            score,
-            request.get("selected_career"),
-            request.get("notes")
-        )
-        return response
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error en /feedback: {e}", exc_info=True)
-        return {"status": "error", "message": "Error interno"}
-
-@app.post("/rag")
-async def endpoint_rag(
-    request: dict,  # {career, question}
-    session_token: str = Depends(get_session_token),
-) -> dict:
-    """
-    POST /rag
-    
-    Delega a orchestration.handle_rag_query().
-    """
-    try:
-        response = orchestration.handle_rag_query(
-            session_token,
-            request.get("career"),
-            request.get("question")
-        )
-        return response
-    except Exception as e:
-        logger.error(f"Error en /rag: {e}", exc_info=True)
-        return {"status": "error", "answer": "", "sources": []}
+@app.get("/health")
+async def health():
+    """Health check para desarrollo local."""
+    return {"status": "ok"}
 
 @app.on_event("startup")
 async def startup():
-    """Inicializa componentes al levantarse el servidor."""
-    global orchestration
-    
-    # Inicializar servicios...
-    # (código de inicialización)
-    
-    logger.info("Orquestador iniciado correctamente")
+    """Inicializa ScoringEngine al levantar."""
+    global scoring_engine
+    scoring_engine = ScoringEngine("data/features.csv", "data/feature_config.json")
+    logger.info("Matching Context local iniciado correctamente")
 ```
 
 ---
 
-### `frontend/app.js` — Gestor de Aplicación (JavaScript)
+### `frontend/app.js` — Gestor de Aplicación (demo, JWT desde Identity Context)
 
 ```javascript
 class CareerMatchApp {
     constructor() {
-        this.sessionToken = null;
-        this.baseUrl = "http://localhost:8000"; // O URL de servidor
+        this.jwt = null;
+        this.userId = null;
+        this.identityBaseUrl = "https://api.careermatch.pe/v1/auth";    // Identity Context
+        this.advisorBaseUrl = "https://api.careermatch.pe/v1/advisor";  // AI Advisor
+        this.matchingBaseUrl = "https://api.careermatch.pe/v1/matching";// Matching Context
     }
 
     async init() {
-        this.sessionToken = localStorage.getItem("session_token");
-        if (!this.sessionToken) {
-            // Demo: crear sesión anónima local (sin Lambda)
-            // En producción, se usaría POST /session/create vía Lambda
-            await this.createSessionStub();
+        this.jwt = localStorage.getItem("jwt");
+        this.userId = localStorage.getItem("userId");
+        if (!this.jwt) {
+            await this.redirectToLogin();
         }
         this.attachEventListeners();
     }
 
-    async createSessionStub() {
-        // Stub: generar token local para demo
-        this.sessionToken = "token_" + Math.random().toString(36).substr(2, 9);
-        localStorage.setItem("session_token", this.sessionToken);
+    async redirectToLogin() {
+        // Redirige al frontend del Identity Context para login/register
+        window.location.href = "/login.html";
     }
 
     async sendMessage(message) {
@@ -1413,10 +1258,11 @@ class CareerMatchApp {
         this.appendMessage(message, "user");
         
         try {
-            const response = await fetch(`${this.baseUrl}/chat`, {
+            // El chat lo maneja el AI Advisor (repo 08-deep-agent)
+            const response = await fetch(`${this.advisorBaseUrl}/chat`, {
                 method: "POST",
                 headers: {
-                    "Authorization": `Bearer ${this.sessionToken}`,
+                    "Authorization": `Bearer ${this.jwt}`,
                     "Content-Type": "application/json"
                 },
                 body: JSON.stringify({
@@ -1430,7 +1276,7 @@ class CareerMatchApp {
             if (data.status === "success") {
                 this.appendMessage(data.conversation.bot_message, "bot");
                 
-                if (data.ranking.status === "ready") {
+                if (data.ranking?.status === "ready") {
                     this.rankingId = data.ranking_id;
                     this.displayRanking(data.ranking.top_5);
                 }
@@ -1440,6 +1286,27 @@ class CareerMatchApp {
         } catch (error) {
             console.error("Error:", error);
             this.showError("Error al procesar tu consulta");
+        }
+    }
+
+    async sendFeedback(rankingId, score, selectedCareer, notes) {
+        // Feedback va directo a Matching Context (Lambda handler)
+        try {
+            const response = await fetch(`${this.matchingBaseUrl}/feedback`, {
+                method: "POST",
+                headers: {
+                    "Authorization": `Bearer ${this.jwt}`,
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    rankingId, validationScore: score,
+                    selectedCareer, notes
+                })
+            });
+            const data = await response.json();
+            console.log("Feedback guardado:", data);
+        } catch (error) {
+            console.error("Error al enviar feedback:", error);
         }
     }
 
@@ -1977,6 +1844,8 @@ class RankingItem:
 
 ### `SessionContext` (en memoria, desarrollo local, TTL=1800s)
 
+> **NOTA:** La sesión conversacional vive en el AI Advisor (repo `08-deep-agent`), no en el Matching Context. `SessionContext` solo se usa para desarrollo local del Matching Context (simulación). En producción, el JWT del Identity Context se valida en cada invocación Lambda y no hay estado de sesión en memoria.
+
 ```python
 class SessionContext:
     """Contexto conversacional de sesión (en memoria para desarrollo local)."""
@@ -2008,7 +1877,7 @@ class FeedbackRecord:
     """Registro persistido de una consulta + ranking + validación."""
     
     # Identificadores
-    session_id: str  # UUID de sesión
+    user_id: str  # sub del JWT (Identity Context)
     ranking_id: str  # UUID único del ranking
     
     # Entrada original del usuario
@@ -2538,7 +2407,7 @@ END FUNCTION
 
 **Headers:**
 ```
-Authorization: Bearer {session_token}
+Authorization: Bearer {jwt_token}
 Content-Type: application/json
 ```
 
@@ -2753,7 +2622,7 @@ Content-Type: application/json
 -- Tabla: feedback (contiene rankings + validaciones)
 CREATE TABLE IF NOT EXISTS feedback (
     id BIGSERIAL PRIMARY KEY,
-    session_id UUID NOT NULL,
+    user_id TEXT NOT NULL,
     ranking_id UUID NOT NULL UNIQUE,
     
     -- Entrada del usuario
@@ -2793,7 +2662,7 @@ CREATE TABLE IF NOT EXISTS feedback (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     
     -- Índices
-    INDEX idx_session ON feedback(session_id),
+    INDEX idx_user ON feedback(user_id),
     INDEX idx_ranking ON feedback(ranking_id),
     INDEX idx_created ON feedback(created_at)
 );
@@ -2854,7 +2723,7 @@ DATABASE_URL = os.getenv(
 -- Base de datos de demo (SQLite)
 CREATE TABLE feedback (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
     ranking_id TEXT NOT NULL UNIQUE,
     
     user_input TEXT NOT NULL,
@@ -2885,7 +2754,7 @@ CREATE TABLE feedback (
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX idx_feedback_session ON feedback(session_id);
+CREATE INDEX idx_feedback_user ON feedback(user_id);
 CREATE INDEX idx_feedback_ranking ON feedback(ranking_id);
 ```
 
@@ -3273,7 +3142,7 @@ class JSONFormatter(logging.Formatter):
             "level": record.levelname,
             "component": record.name,
             "message": record.getMessage(),
-            "session_id": getattr(record, "session_id", None),
+            "user_id": getattr(record, "user_id", None),
             "function": record.funcName,
             "line": record.lineno,
             "extra": getattr(record, "extra_data", {})
@@ -3294,7 +3163,7 @@ logger.setLevel(logging.INFO)  # Configurable por LOG_LEVEL env var
 # Ejemplo de uso con contexto
 logger.info("Ranking generated", extra={
     "extra_data": {
-        "session_id": session_id,
+        "user_id": user_id,
         "top_5_count": 5,
         "confidence_score": 0.85
     }
@@ -3452,13 +3321,13 @@ def test_weights_validity():
 
 ```python
 def test_isolation():
-    session_a = auth_service.create_session()
-    session_b = auth_service.create_session()
+    # Feedback del usuario A no debe ser visible por usuario B
+    feedback_a = feedback_storage.get_feedback(user_id="user-A")
+    feedback_b = feedback_storage.get_feedback(user_id="user-B")
     
-    # Intentar acceso cruzado
-    result = feedback_storage.get_feedback(session_b['session_id'], 
-                                            session_a['session_id'])
-    assert result is None or len(result) == 0
+    # Aislamiento: A no ve datos de B y viceversa
+    for item in feedback_a:
+        assert item['user_id'] == 'user-A'
 ```
 
 ---
