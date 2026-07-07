@@ -67,7 +67,7 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - Retorna Serie normalizada en `[0, 1]`.
     _Requerimientos: 6.1_
   - [ ] 3.2 Implementar clase `FeatureEngineer` con método `run_pipeline(self) -> pd.DataFrame`:
-    - Constructor: carga `cleaned_csv`, intenta cargar `feature_config.json` (si no existe, crea defaults con fallbacks: `duration_years_fallback=4.0`, `monthly_income_fallback=2500.0`, `annual_cost_fallback=1000.0`, `admission_rate_fallback=30.0`).
+    - Constructor: carga `cleaned_csv`, intenta cargar `feature_config.json` (si no existe, crea defaults con fallbacks: `duration_years_fallback_instituto=4.0`, `duration_years_fallback_universidad=5.0`, `monthly_income_fallback=2500.0`, `annual_cost_fallback=1000.0`, `admission_rate_fallback=30.0`).
     - Método `create_imputation_flags()`: crea flags booleanos para columnas que serán imputadas:
       - `duration_imputed_flag = (duration_years <= 0) OR (duration_years > 10) OR (isna)`.
       - `income_imputed_flag = (monthly_income <= 0) OR (isna)`.
@@ -75,11 +75,11 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - Método `hierarchical_imputation()`: para cada variable inválida:
       - Nivel 1: intenta mediana por `(career_family, management_type)`.
       - Nivel 2: intenta mediana por `career_family`.
-      - Nivel 3: usa fallback desde config.
+      - Nivel 3: usa fallback desde config (para duración: 4 años si Instituto, 5 años si Universidad).
       - Crea columna `{variable}_imputed` con valores imputados.
     - Método `validate_ranges()`: reajusta valores tras imputación:
-      - `duration_imputed` → clamp a `[3, 7]`.
       - `admission_rate_imputed` → clamp a `[0, 90]`.
+      - **Nota**: `duration_years_imputed` no tiene clamp final; el pipeline real no hace clip a `[3,7]`. La imputación jerárquica + fallback por tipo de institución es suficiente.
       - Log warnings si se hace reajuste.
     - Método `normalize_features()`:
       - `income_norm = normalize_variable(monthly_income_imputed, log=True, invert=False)` (mayor ingreso = mejor).
@@ -832,7 +832,7 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
       - Datos persistidos en Aurora.
       - Datos recuperables desde Aurora.
     - Módulos implicados: `data_pipeline`, `backend/llm_service`, `backend/scoring`, `backend/orchestration`, `backend/persistence`, `backend/lambda`.
-    _Requerimientos: 5.4, 7.1–7.3, 8.1–8.3, 9.1, 10.2_
+    _Requerimientos: 5.4, 7.1, 7.2, 7.3, 8.1, 8.2, 8.3, 9.1, 10.2_
 
 - [ ] 27. Validación de Restricciones No Funcionales
   - [ ] 27.1 Tests basados en propiedades: **Propiedad 4 — Reproducibilidad**. **Valida: Requerimiento 9 criterio 9.1**. Estrategia:
