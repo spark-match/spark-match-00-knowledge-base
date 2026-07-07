@@ -203,7 +203,7 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - Retorna dict con pesos válidos.
     _Requerimientos: 2.2, 2.3_
   - [ ] 6.5 Implementar función `calculate_score(weights: dict, afinidad_norm: float, ingreso_norm: float, costo_norm: float, admission_norm: float, duracion_norm: float) -> float`:
-    - Todas las normas ya están orientadas "mayor = mejor" por el pipeline de datos; los parámetros reciben los valores desde columnas `income_norm`, `cost_norm`, `duration_norm`:
+    - Todas las normas ya están orientadas "mayor = mejor" por el pipeline de datos; los parámetros reciben los valores desde columnas `income_norm`, `cost_norm`, `admission_norm`, `duration_norm`:
       - `ingreso_norm` recibe `row["income_norm"]` (mayor ingreso = mejor).
       - `costo_norm` recibe `row["cost_norm"]` (mayor = más barato, ya invertido en pipeline).
       - `admission_norm` recibe `row["admission_norm"]` (mayor = más fácil acceso).

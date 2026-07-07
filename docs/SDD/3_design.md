@@ -622,9 +622,18 @@ class ScoringEngine:
             float [0, 1]
         
         Notas:
-        - Todas las normas ya están orientadas [0,1] con "mayor = mejor para el estudiante"
-        - El pipeline ya invierte costo y duración, y orienta admisión como facilidad
-        - Scoring NO aplica inversiones adicionales
+        - **Todas las normas ya están orientadas [0,1] con "mayor = mejor para el estudiante"**.
+        - El pipeline ya invierte costo y duración, y orienta admisión como facilidad.
+        - Scoring NO aplica inversiones adicionales. No usar `1 - x` en ningún criterio.
+        
+        Variables reales del CSV (features.csv):
+        | Parámetro | Columna real | Fórmula | Significado |
+        |-----------|-------------|---------|-------------|
+        | `afinidad` | calculada | `calculate_affinity(riasec_code, riasec_profile)` | Match vocacional |
+        | `ingreso_norm` | `income_norm` | MinMax(log1p) | Mayor = mejor ingreso |
+        | `costo_norm` | `cost_norm` | 1 − MinMax(log1p) | Mayor = más barato |
+        | `admission_norm` | `admission_norm` | MinMax(raw) | Mayor = más fácil acceso |
+        | `duracion_norm` | `duration_norm` | 1 − MinMax(raw) | Mayor = más corta |
         """
     
     def rank_and_filter(
@@ -1892,7 +1901,7 @@ class StudentProfile:
     w_afinidad: float     # [0,1], peso criterio afinidad RIASEC
     w_ingreso: float      # [0,1], peso criterio ingresos esperados
     w_costo: float        # [0,1], peso criterio costo
-    w_admision: float     # [0,1], peso criterio selectividad admisión
+    w_admision: float     # [0,1], peso criterio facilidad de admisión (admission_norm, mayor = más fácil)
     w_duracion: float     # [0,1], peso criterio duración en años
     
     # Bloque C — filtros duros (no pesan, descartan)
