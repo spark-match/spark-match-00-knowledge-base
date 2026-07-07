@@ -1358,11 +1358,11 @@ def lambda_handler(event: dict, context: object) -> dict:
 
 ```python
 from fastapi import FastAPI, HTTPException, Query
-import logging
+from aws_lambda_powertools import Logger
 from typing import Optional
 
 app = FastAPI(title="CareerMatch Perú — Matching Context (local dev)")
-logger = logging.getLogger("careermatch")
+logger = Logger(service="matching-context")
 
 # Variable global (inicializada en startup)
 scoring_engine = None
@@ -3367,53 +3367,38 @@ except Exception as e:
 
 ---
 
-## Configuración de Logging (Actualizado)
+## Observabilidad — Powertools + X-Ray
+
+Matching Context usa **AWS Lambda Powertools for Python (`Logger`)** para todo el logging, igual que el resto del backend, garantizando trazabilidad cross-context vía `correlationId` y X-Ray.
+
+- **Logger**: `from aws_lambda_powertools import Logger; logger = Logger(service="matching-context")`
+  - Inyecta automáticamente `correlationId`, `userId`, `requestId`, `functionName` en cada entrada.
+  - Formato JSON estructurado (no requiere `JSONFormatter` custom).
+  - Extra context: `logger.info("Ranking generated", extra={"top_5_count": 5})`.
+- **Tracer**: `from aws_lambda_powertools import Tracer; tracer = Tracer(service="matching-context")`
+  - Genera spans de X-Ray automáticos para cada invocación Lambda y llamadas AWS SDK.
+- **Metrics**: `from aws_lambda_powertools import Metrics; metrics = Metrics(service="matching-context")`
+  - Emite métricas CloudWatch custom (latencia de scoring, tasas de acierto, etc.).
+
+**Destino:**
+- **CloudWatch Logs** (producción): Logs automáticos vía Lambda + Powertools.
+- **stdout** (desarrollo local): Powertools imprime JSON a stdout por defecto.
+- X-Ray tracing habilitado en cada handler Lambda (trazabilidad cross-context).
+
+**Seguridad:** Powertools respeta `LOG_LEVEL` desde variable de entorno; no loguea PII ni tokens.
 
 ```python
-import logging
-import json
-from datetime import datetime
-import boto3
+from aws_lambda_powertools import Logger
 
-class JSONFormatter(logging.Formatter):
-    def format(self, record):
-        log_obj = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-            "level": record.levelname,
-            "component": record.name,
-            "message": record.getMessage(),
-            "user_id": getattr(record, "user_id", None),
-            "function": record.funcName,
-            "line": record.lineno,
-            "extra": getattr(record, "extra_data", {})
-        }
-        # Nunca loguear tokens completos, claves AWS
-        if "token" in str(log_obj).lower():
-            log_obj["warning"] = "token_field_present_but_hidden"
-        return json.dumps(log_obj)
+logger = Logger(service="matching-context")
 
-# Configurar logging
-handler = logging.StreamHandler()  # stdout (Docker)
-handler.setFormatter(JSONFormatter())
-
-logger = logging.getLogger("careermatch")
-logger.addHandler(handler)
-logger.setLevel(logging.INFO)  # Configurable por LOG_LEVEL env var
-
-# Ejemplo de uso con contexto
-logger.info("Ranking generated", extra={
-    "extra_data": {
-        "user_id": user_id,
+# Uso en Lambda handler
+def lambda_handler(event, context):
+    logger.info("Ranking generated", extra={
         "top_5_count": 5,
         "confidence_score": 0.85
-    }
-})
+    })
 ```
-
-**Destino:** 
-- **CloudWatch Logs** (producción): Logs automáticos vía Fargate/Lambda
-- **stdout** (desarrollo): Visible en `docker logs`
-- **Archivo local** (opcional): Para persistencia local
 
 ---
 

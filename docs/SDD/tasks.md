@@ -898,7 +898,7 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
     - NUNCA loguear: tokens completos, API keys (AWS), claves JWT, credenciales DB, PII de usuarios (nombres reales completos).
     - SÍ loguear: `user_id`, timestamps, nombres de carreras (públicos), scores, pesos, eventos de flujo.
     - Ejemplo: `"Ranking generated: user_id={user_id}, career_count=5, confidence_score=0.85"`.
-    - Configuración centralizada en `backend/utils.py` (función `setup_logging()`).
+    - El logging usa **AWS Lambda Powertools Logger** (`from aws_lambda_powertools import Logger`), no `logging.basicConfig` ni formatters custom. Para desarrollo local, Powertools imprime JSON a stdout por defecto. No implementar `utils.py` con `setup_logging()` propia.
     _Requerimientos: 10.4_
   - [ ] 28.3 Crear `docs/ARCHITECTURE.md`:
     - Diagrama de componentes (ASCII o Mermaid).
