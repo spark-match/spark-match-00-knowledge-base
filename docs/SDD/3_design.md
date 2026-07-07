@@ -46,7 +46,7 @@ Fargate Service (Deep Agent):
 
 Persistencia:
     ├→ Aurora PostgreSQL: feedback, rankings, pgvector (career_chunks)
-    └→ DynamoDB: universities (georreferencia, GSI por region)
+    └→ DynamoDB: universities (georreferencia, GSI location-index)
 
 Pipeline de Datos (batch, EventBridge cron → AWS Batch/Fargate task):
     Ingestion (Selenium, Ponte en Carrera)
@@ -88,7 +88,7 @@ Lambda no es adecuado: timeout corto (15 min), stateless forzado, costo por llam
 | | 2.2 Peso explícito en 0 + re-normalización | `validate_weights` |
 | | 2.3 Defaults 0.2 si no se logra priorizar | Fallback en Orchestrator |
 | **R3 — Filtros** | 3.1 Filtros C descartan antes scoring | `rank_and_filter` fase 1 |
-| | 3.2 "Me da igual" desactiva filtro | `profile.region = None` |
+ | | 3.2 "Me da igual" desactiva filtro | `profile.location = None` |
 | **R4 — Confianza** | 4.1 Fórmula `calculate_confidence` | 11 campos, [0,1] |
 | | 4.2 Avance si confidence >= 0.70 | `should_transition_to_recommendation` |
 | | 4.3 Máximo 4 repreguntas | `turn_count >= 4` fuerza ranking |
@@ -108,7 +108,7 @@ Lambda no es adecuado: timeout corto (15 min), stateless forzado, costo por llam
 | | 8.3 JWT sin estado compartido | `Auth_Service` + validación local |
 | **R9 — Persistencia** | 9.1 Aurora: feedback, rankings aislados | `FeedbackRecord` + índices |
 | | 9.2 pgvector Aurora: career_chunks | `career_chunks` tabla |
-| | 9.3 DynamoDB: universities + GSI region | `universities` tabla |
+| | 9.3 DynamoDB: universities + GSI location-index | `universities` tabla |
 | **R10 — No funcionales** | 10.1 Scoring 6k+ combos en ≤ 1s | Benchmark test |
 | | 10.2 Aislamiento por `session_id` | Queries filtrando siempre |
 | | 10.3 Fallback templado si fallan componentes | Degradación controlada |
@@ -336,9 +336,9 @@ class LLMService:
         
         Returns:
             {
-                "region": str | None,  
+                "location": str | None,  
                     # Región específica o None (= "me da igual")
-                "tipo_institucion": "publica" | "privada" | None,
+                "management_type": "publica" | "privada" | None,
                 "presupuesto_max": float | None,  # En soles
                 "modalidad": "presencial" | "virtual" | None,
                 "confidence": float [0,1]
@@ -346,8 +346,8 @@ class LLMService:
         
         Comportamiento:
         - Detecta si usuario menciona "me da igual" para algún filtro → None
-        - Detecta región: "Lima", "Arequipa", etc. → normaliza a región oficial
-        - Detecta tipo: "pública", "privada"
+        - Detecta ubicación: "Lima", "Arequipa", etc. → normaliza
+        - Detecta tipo gestión: "pública", "privada"
         - Detecta presupuesto: números mencionados
         - Detecta modalidad: "online", "virtual", "presencial"
         
@@ -404,7 +404,7 @@ class LLMService:
         concordancia_score: float,  # [0,1]
         scores_by_criterion: dict,  # {afinidad, ingreso, costo, admision, duracion}
         user_profile: StudentProfile,
-        verifiable_data: dict,  # {ingreso_promedio, costo_mensualidad, tasa_admision, duracion_anios}
+        verifiable_data: dict,  # {monthly_income_imputed, annual_cost_imputed, admission_rate_imputed, duration_years_imputed}
     ) -> str:
         """
         Redacta explicación personalizada de recomendación.
@@ -493,9 +493,10 @@ class ScoringEngine:
         Comportamiento:
         - Carga features.csv en memoria (Pandas DataFrame)
         - Carga config.json (parámetros de normalización)
-        - Valida esquema: career_id, career_name, institution, 
-          riasec_profile, ingreso_norm, costo_norm, admission_norm, 
-          duracion_norm, region, tipo_institucion, datos verificables
+        - Valida esquema (columnas de features.csv): id, career, institution, 
+          riasec_profile, income_norm, cost_norm, admission_norm, 
+          duration_norm, location, management_type, y las 4 imputadas:
+          monthly_income_imputed, annual_cost_imputed, admission_rate_imputed, duration_years_imputed
         
         Errores:
         - FileNotFoundError: si archivos no existen
@@ -591,8 +592,8 @@ class ScoringEngine:
             [
                 {
                     "rank": 1,
-                    "career_id": "...",
-                    "career_name": "Estadística",
+                    "id": "estadistica_001",
+                    "career": "Estadística",
                     "institution": "UNMSM",
                     "concordancia_score": 0.847,
                     "scores_by_criterion": {
@@ -603,10 +604,10 @@ class ScoringEngine:
                         "duracion": 0.75
                     },
                     "verifiable_data": {
-                        "ingreso_promedio": 3200,
-                        "costo_mensualidad": 100,
-                        "tasa_admision": 18,
-                        "duracion_anios": 5
+                        "monthly_income_imputed": 3200,
+                        "annual_cost_imputed": 100,
+                        "admission_rate_imputed": 18,
+                        "duration_years_imputed": 5
                     }
                 },
                 ...
@@ -1011,7 +1012,7 @@ class Orchestration:
         Args:
             session_token: Token de sesión (validado por HTTP layer)
             message: Mensaje del usuario en español
-            metadata: Filtros opcionales {region, budget_max, institution_type}
+            metadata: Filtros opcionales {location, budget_max, management_type}
         
         Returns:
             ChatResponse:
@@ -1027,13 +1028,14 @@ class Orchestration:
                     "top_5": [
                         {
                             "rank": 1,
+                            "id": str,
                             "career": str,
                             "institution": str,
                             "concordancia_score": float,
-                            "monthly_income": float,
-                            "annual_cost": float,
-                            "admission_rate": float,
-                            "duration_years": float,
+                            "monthly_income_imputed": float,
+                            "annual_cost_imputed": float,
+                            "admission_rate_imputed": float,
+                            "duration_years_imputed": float,
                             "explanation": str
                         },
                         ...
@@ -1077,7 +1079,7 @@ class Orchestration:
            
            Si BLOQUE C:
                result_c = llm_service.interpret_bloque_c(message, history)
-               Actualizar profile.region, tipo_institucion, presupuesto_max, modalidad
+                Actualizar profile.location, management_type, presupuesto_max, modalidad
         
         5. ACTUALIZAR CONTEXTO Y CALCULAR CONFIANZA
            session_manager.update_profile(session_id, nuevos_datos)
@@ -1115,7 +1117,7 @@ class Orchestration:
               for item in top_5:
                   explanation = llm_service.generate_explanation(
                       rank=item['rank'],
-                      career=item['career_name'],
+                      career=item['career'],
                       institution=item['institution'],
                       score=item['concordancia_score'],
                       scores_by_criterion=item['scores_by_criterion'],
@@ -1134,11 +1136,11 @@ class Orchestration:
                   timestamp=now()
               )
            
-           f. Obtener carreras con RAG:
-              rag_available = [
-                  item['career_name'] for item in top_5
-                  if rag_module.is_career_available(item['career_name'])
-              ]
+            f. Obtener carreras con RAG:
+               rag_available = [
+                   item['career'] for item in top_5
+                   if rag_module.is_career_available(item['career'])
+               ]
            
            g. Retornar:
               {
@@ -1527,13 +1529,25 @@ class DataCleaner:
         self.logger = logging.getLogger(__name__)
     
     def standardize_columns(self) -> pd.DataFrame:
-        """Renombra columnas a snake_case."""
+        """Renombra columnas del Excel crudo a snake_case estándar.
+        
+        Columnas de salida (features.csv real):
+          id, career, institution, career_family,
+          location, management_type, institution_type,
+          monthly_income, annual_cost, admission_rate, duration_years
+        """
         mapping = {
             "N°": "id",
-            "Familia Carrera": "career_family",
-            "Carrera": "career_name",
+            "Carrera": "career",
             "Universidad": "institution",
-            # ... más mappings
+            "Familia Carrera": "career_family",
+            "Ubicación": "location",
+            "Gestión": "management_type",       # Pública/Privada
+            "Tipo Institución": "institution_type",  # Universidad/Instituto (NO es el filtro)
+            "Ingreso Mensual": "monthly_income",
+            "Costo Anual": "annual_cost",
+            "Tasa Admisión": "admission_rate",
+            "Duración (años)": "duration_years",
         }
         self.df = self.df.rename(columns=mapping)
         return self.df
@@ -1541,7 +1555,7 @@ class DataCleaner:
     def remove_empty_rows(self) -> pd.DataFrame:
         """Elimina filas incompletas críticas."""
         initial_count = len(self.df)
-        self.df = self.df.dropna(subset=["career_name", "institution"])
+        self.df = self.df.dropna(subset=["career", "institution"])
         removed = initial_count - len(self.df)
         self.logger.info(f"Filas removidas: {removed}")
         return self.df
@@ -1600,7 +1614,12 @@ class FeatureEngineer:
         }
     
     def create_imputation_flags(self) -> pd.DataFrame:
-        """Crea flags para variables a imputar."""
+        """Crea flags para variables a imputar.
+        
+        Columnas crudas de entrada: monthly_income, annual_cost, admission_rate, duration_years.
+        Columnas imputadas de salida: monthly_income_imputed, annual_cost_imputed, 
+        admission_rate_imputed, duration_years_imputed.
+        """
         self.df["duration_imputed_flag"] = (
             (self.df["duration_years"] <= 0) |
             (self.df["duration_years"] > 10) |
@@ -1618,7 +1637,7 @@ class FeatureEngineer:
     
     def hierarchical_imputation(self) -> pd.DataFrame:
         """Imputación en cascada (familia → fallback)."""
-        for col in ["duration_years", "monthly_income", "annual_cost"]:
+        for col in ["duration_years", "monthly_income", "annual_cost", "admission_rate"]:
             # Nivel 1: mediana por family
             family_medians = self.df.groupby("career_family")[col].median()
             
@@ -1633,28 +1652,34 @@ class FeatureEngineer:
     
     def validate_ranges(self) -> pd.DataFrame:
         """Valida y ajusta rangos."""
-        self.df["duration_imputed"] = self.df["duration_imputed"].clip(3, 7)
+        self.df["duration_years_imputed"] = self.df["duration_years_imputed"].clip(3, 7)
         self.df["admission_rate_imputed"] = self.df["admission_rate_imputed"].clip(0, 90)
         return self.df
     
     def normalize_features(self) -> pd.DataFrame:
-        """Genera 4 variables normalizadas [0,1] (mayor = mejor para el estudiante)."""
-        # ingreso_norm = MinMax(log1p(income))  — mayor ingreso = mejor (no invertir)
-        self.df["ingreso_norm"] = np.log1p(self.df["monthly_income_imputed"])
-        self.df["ingreso_norm"] = (
-            (self.df["ingreso_norm"] - self.df["ingreso_norm"].min()) /
-            (self.df["ingreso_norm"].max() - self.df["ingreso_norm"].min())
+        """Genera 4 variables normalizadas [0,1] (mayor = mejor para el estudiante).
+        
+        Convención de nombres (features.csv real):
+          income_norm, cost_norm, admission_norm, duration_norm
+        Las columnas imputadas de entrada son:
+          monthly_income_imputed, annual_cost_imputed, admission_rate_imputed, duration_years_imputed
+        """
+        # income_norm = MinMax(log1p(income))  — mayor ingreso = mejor (no invertir)
+        self.df["income_norm"] = np.log1p(self.df["monthly_income_imputed"])
+        self.df["income_norm"] = (
+            (self.df["income_norm"] - self.df["income_norm"].min()) /
+            (self.df["income_norm"].max() - self.df["income_norm"].min())
         )
         
-        # costo_norm = 1 - MinMax(log1p(cost))  — mayor = más barato (invertir)
+        # cost_norm = 1 - MinMax(log1p(cost))  — mayor = más barato (invertir)
         cost_log = np.log1p(self.df["annual_cost_imputed"])
-        self.df["costo_norm"] = (
+        self.df["cost_norm"] = (
             1 - ((cost_log - cost_log.min()) / (cost_log.max() - cost_log.min()))
         )
         
-        # duracion_norm = 1 - MinMax(duration)  — mayor = más corta (invertir)
-        duration = self.df["duration_imputed"]
-        self.df["duracion_norm"] = (
+        # duration_norm = 1 - MinMax(duration)  — mayor = más corta (invertir)
+        duration = self.df["duration_years_imputed"]
+        self.df["duration_norm"] = (
             1 - ((duration - duration.min()) / (duration.max() - duration.min()))
         )
         
@@ -1720,8 +1745,8 @@ class StudentProfile:
     w_duracion: float     # [0,1], peso criterio duración en años
     
     # Bloque C — filtros duros (no pesan, descartan)
-    region: str | None                  # Región de Perú (None = "me da igual")
-    tipo_institucion: str | None        # 'publica' | 'privada' | None
+    location: str | None                # Región/ubicación del estudiante (None = "me da igual")
+    management_type: str | None         # 'publica' | 'privada' | None (tipo de gestión, columna features.csv)
     presupuesto_max: float | None       # Máximo costo anual (soles)
     modalidad: str | None               # 'presencial' | 'virtual' | None
     
@@ -1747,29 +1772,38 @@ class StudentProfile:
 
 ```python
 class CareerFeature:
-    """Carrera-Universidad individual con features normalizadas."""
+    """Carrera-Universidad individual con features normalizadas.
     
-    career_id: str  # Identificador único
-    career_name: str  # Nombre de carrera (ej "Estadística")
+    Mapeo desde features.csv real (Ponte en Carrera).
+    `riasec_profile` se agrega vía join con tabla RIASEC (no viene en CSV crudo).
+    `management_type` (Pública/Privada) es distinto de `institution_type` (Universidad/Instituto).
+    """
+    
+    id: str  # Identificador único de la carrera (de features.csv)
+    career: str  # Nombre de carrera (ej "Estadística")
     institution: str  # Universidad que ofrece
-    region: str  # Región donde está la universidad
-    tipo_institucion: str  # 'publica' | 'privada'
     
-    # RIASEC etiquetado (Bedrock + validación muestral)
+    # RIASEC etiquetado (agregado vía join externo)
     riasec_profile: str  # 3 letras, ej "RIA"
     riasec_source: str  # 'seed' | 'llm_tagged' | 'family_fallback' | 'pending'
     
-    # Features normalizadas [0,1] para scoring (todas orientadas: mayor = mejor para el estudiante)
-    ingreso_norm: float    # MinMax(log1p(ingreso_promedio)) — mayor ingreso = mejor
-    costo_norm: float      # 1 - MinMax(log1p(costo_mensualidad)) — mayor = más barato (invertido)
-    admission_norm: float  # MinMax(tasa_admision) — mayor = más fácil acceso (no invertido)
-    duracion_norm: float   # 1 - MinMax(duracion_anios) — mayor = más corta (invertido)
+    # Campos geo-administrativos (del CSV crudo)
+    location: str  # Región donde está la universidad (columna features.csv)
+    management_type: str  # 'Pública' | 'Privada' — tipo de gestión
+    # NOTA: Existe también `institution_type` (Universidad/Instituto) que NO es lo mismo.
+    #       El filtro del Figma pregunta por gestión (Pública/Privada), no por tipo institucional.
     
-    # Datos verificables (del MINEDU)
-    ingreso_promedio: float  # S/. / mes (dato crudo)
-    costo_mensualidad: float  # S/. (dato crudo)
-    tasa_admision: float  # % (dato crudo)
-    duracion_anios: float  # Años (dato crudo)
+    # Features normalizadas [0,1] para scoring (todas orientadas: mayor = mejor para el estudiante)
+    income_norm: float    # MinMax(log1p(monthly_income_imputed)) — mayor ingreso = mejor
+    cost_norm: float      # 1 - MinMax(log1p(annual_cost_imputed)) — mayor = más barato (invertido)
+    admission_norm: float  # MinMax(admission_rate_imputed) — mayor = más fácil acceso (no invertido)
+    duration_norm: float   # 1 - MinMax(duration_years_imputed) — mayor = más corta (invertido)
+    
+    # Datos verificables imputados (valores imputados, no crudos, para mostrar al usuario)
+    monthly_income_imputed: float  # S/. / mes (imputado)
+    annual_cost_imputed: float  # S/. / año (imputado)
+    admission_rate_imputed: float  # % (imputado)
+    duration_years_imputed: float  # Años (imputado)
 ```
 
 ---
@@ -1781,8 +1815,8 @@ class RankingItem:
     """Un item en el ranking Top-5."""
     
     rank: int  # 1, 2, 3, 4, 5
-    career_id: str
-    career_name: str  # "Estadística"
+    id: str  # career id from features.csv
+    career: str  # "Estadística" (antes career_name)
     institution: str  # "UNMSM"
     
     # Score de concordancia
@@ -1797,12 +1831,12 @@ class RankingItem:
                                 #   duracion: 0.75
                                 # }
     
-    # Datos verificables del MINEDU
+    # Datos verificables imputados del MINEDU
     datos_verificables: dict  # {
-                               #   ingreso_promedio: 3200,  # S/. mes
-                               #   costo_mensualidad: 100,  # S/. mes
-                               #   tasa_admision: 18,  # %
-                               #   duracion_anios: 5
+                               #   monthly_income_imputed: 3200,  # S/. mes
+                               #   annual_cost_imputed: 100,     # S/. año
+                               #   admission_rate_imputed: 18,   # %
+                               #   duration_years_imputed: 5
                                # }
     
     # Explicación personalizada generada por LLM
@@ -2153,14 +2187,16 @@ FUNCTION normalize_variable(
 END FUNCTION
 
 // Aplicación específica para features.csv (todas orientadas: mayor = mejor para el estudiante):
-ingreso_norm = normalize_variable(ingreso_promedio, log=True, invert=False)
+// NOTA: Los inputs provienen del DataFrame después de standardize_columns e imputación,
+// por lo que usan las columnas imputadas.
+income_norm = normalize_variable(monthly_income_imputed, log=True, invert=False)
     // Mayor ingreso = mejor → no invertir
-costo_norm = normalize_variable(costo_mensualidad, log=True, invert=True)
-    // Menor costo = mejor → invertir (mayor costo_norm = más barato)
-admission_norm = normalize_variable(tasa_admision, log=False, invert=False)
+cost_norm = normalize_variable(annual_cost_imputed, log=True, invert=True)
+    // Menor costo = mejor → invertir (mayor cost_norm = más barato)
+admission_norm = normalize_variable(admission_rate_imputed, log=False, invert=False)
     // Mayor tasa = más fácil = mejor → no invertir
-duracion_norm = normalize_variable(duracion_anios, log=False, invert=True)
-    // Menor duración = mejor → invertir (mayor duracion_norm = más corta)
+duration_norm = normalize_variable(duration_years_imputed, log=False, invert=True)
+    // Menor duración = mejor → invertir (mayor duration_norm = más corta)
 ```
 
 ---
@@ -2218,16 +2254,19 @@ FUNCTION rank_and_filter(
     riasec_code = calculate_riasec_code(profile.riasec_scores)
     
     // Paso 2: Aplicar filtros duros (Bloque C)
+    // Columnas de features.csv: location, management_type, annual_cost_imputed, modalidad
     filtered_df = features_df.copy()
     
-    IF profile.region != None:  // Si no dijo "me da igual"
-        filtered_df = filtered_df[filtered_df["region"] == profile.region]
+    IF profile.location != None:
+        filtered_df = filtered_df[filtered_df["location"] == profile.location]
     
-    IF profile.tipo_institucion != None:
-        filtered_df = filtered_df[filtered_df["tipo_institucion"] == profile.tipo_institucion]
+    IF profile.management_type != None:
+        // Normalizar: StudentProfile guarda 'publica'/'privada', CSV guarda 'Pública'/'Privada'
+        csv_val = "Pública" if profile.management_type == "publica" else "Privada"
+        filtered_df = filtered_df[filtered_df["management_type"] == csv_val]
     
     IF profile.presupuesto_max != None:
-        filtered_df = filtered_df[filtered_df["costo_mensualidad"] <= profile.presupuesto_max]
+        filtered_df = filtered_df[filtered_df["annual_cost_imputed"] <= profile.presupuesto_max]
     
     IF profile.modalidad != None:
         filtered_df = filtered_df[filtered_df["modalidad"] == profile.modalidad]
@@ -2243,7 +2282,7 @@ FUNCTION rank_and_filter(
         // Si riasec_profile falta, afinidad = 0.5 (fallback)
         IF row["riasec_profile"] == None or row["riasec_profile"] == "":
             afinidad = 0.5
-            LOG_WARNING(f"RIASEC faltante para {row['career_id']}")
+            LOG_WARNING(f"RIASEC faltante para {row['id']}")
         
         // Calcular score final (todas las normas ya están orientadas "mayor = mejor")
         score = calculate_score(
@@ -2255,29 +2294,29 @@ FUNCTION rank_and_filter(
                 "w_duracion": profile.w_duracion
             },
             afinidad_norm=afinidad,
-            ingreso_norm=row["ingreso_norm"],
-            costo_norm=row["costo_norm"],
+            ingreso_norm=row["income_norm"],
+            costo_norm=row["cost_norm"],
             admission_norm=row["admission_norm"],
-            duracion_norm=row["duracion_norm"]
+            duracion_norm=row["duration_norm"]
         )
         
         results.append({
-            "career_id": row["career_id"],
-            "career_name": row["career_name"],
+            "id": row["id"],
+            "career": row["career"],
             "institution": row["institution"],
             "concordancia_score": score,
             "scores_by_criterion": {
                 "afinidad": afinidad,
-                "ingreso": row["ingreso_norm"],
-                "costo": row["costo_norm"],
+                "ingreso": row["income_norm"],
+                "costo": row["cost_norm"],
                 "admision": row["admission_norm"],
-                "duracion": row["duracion_norm"]
+                "duracion": row["duration_norm"]
             },
             "verifiable_data": {
-                "ingreso_promedio": row["ingreso_promedio"],
-                "costo_mensualidad": row["costo_mensualidad"],
-                "tasa_admision": row["tasa_admision"],
-                "duracion_anios": row["duracion_anios"]
+                "monthly_income_imputed": row["monthly_income_imputed"],
+                "annual_cost_imputed": row["annual_cost_imputed"],
+                "admission_rate_imputed": row["admission_rate_imputed"],
+                "duration_years_imputed": row["duration_years_imputed"]
             }
         })
     
@@ -2360,9 +2399,9 @@ END FUNCTION
 {
     "message": "Me interesan las matemáticas y el análisis de datos",
     "metadata": {
-        "region": null,
+        "location": null,
         "budget_max": null,
-        "institution_type": null
+        "management_type": null
     }
 }
 ```
@@ -2406,7 +2445,7 @@ Content-Type: application/json
         "top_5": [
             {
                 "rank": 1,
-                "career_name": "Estadística",
+                "career": "Estadística",
                 "institution": "UNMSM",
                 "concordancia_score": 0.847,
                 "scores_by_criterion": {
@@ -2416,17 +2455,17 @@ Content-Type: application/json
                     "admision": 0.60,
                     "duracion": 0.75
                 },
-                "datos_verificables": {
-                    "ingreso_promedio": 3200,
-                    "costo_mensualidad": 100,
-                    "tasa_admision": 18,
-                    "duracion_anios": 5
-                },
-                "explicacion": "Te recomendamos Estadística en la UNMSM porque tu afinidad con el análisis de datos es muy alta (85/100). Esta carrera ofrece uno de los mejores ingresos en el mercado (S/. 3,200/mes según datos del MINEDU) con un costo relativamente accesible. Aunque es selectiva (18% de admisión), es factible con tu fortaleza en matemáticas."
+                    "datos_verificables": {
+                        "monthly_income_imputed": 3200,
+                        "annual_cost_imputed": 100,
+                        "admission_rate_imputed": 18,
+                        "duration_years_imputed": 5
+                    },
+                    "explicacion": "Te recomendamos Estadística en la UNMSM porque tu afinidad con el análisis de datos es muy alta (85/100). Esta carrera ofrece uno de los mejores ingresos en el mercado (S/. 3,200/mes según datos del MINEDU) con un costo relativamente accesible. Aunque es selectiva (18% de admisión), es factible con tu fortaleza en matemáticas."
             },
             {
                 "rank": 2,
-                "career_name": "Ingeniería Civil",
+                "career": "Ingeniería Civil",
                 "institution": "UNI",
                 "concordancia_score": 0.812,
                 "scores_by_criterion": {
@@ -2437,16 +2476,16 @@ Content-Type: application/json
                     "duracion": 0.70
                 },
                 "datos_verificables": {
-                    "ingreso_promedio": 3500,
-                    "costo_mensualidad": 120,
-                    "tasa_admision": 22,
-                    "duracion_anios": 5
+                    "monthly_income_imputed": 3500,
+                    "annual_cost_imputed": 120,
+                    "admission_rate_imputed": 22,
+                    "duration_years_imputed": 5
                 },
                 "explicacion": "Ingeniería Civil en la UNI es otra excelente opción. Combina razonamiento analítico con aplicaciones prácticas. Los ingresos son superiores (S/. 3,500/mes) y la demanda en el mercado es consistente. Un poco más selectiva que Estadística, pero muy accesible para estudiantes con tu perfil."
             },
             {
                 "rank": 3,
-                "career_name": "Ciencia de Datos",
+                "career": "Ciencia de Datos",
                 "institution": "Pontificia Universidad Católica",
                 "concordancia_score": 0.795,
                 "scores_by_criterion": {
@@ -2457,16 +2496,16 @@ Content-Type: application/json
                     "duracion": 0.68
                 },
                 "datos_verificables": {
-                    "ingreso_promedio": 3100,
-                    "costo_mensualidad": 280,
-                    "tasa_admision": 35,
-                    "duracion_anios": 4
+                    "monthly_income_imputed": 3100,
+                    "annual_cost_imputed": 280,
+                    "admission_rate_imputed": 35,
+                    "duration_years_imputed": 4
                 },
                 "explicacion": "Ciencia de Datos tiene la máxima afinidad con tu perfil (92/100) y es más nueva en el mercado. El programa es más corto (4 años) y menos selectivo. Sin embargo, es una institución privada con costos mayores (S/. 280/mes). Es ideal si buscas especialización rápida."
             },
             {
                 "rank": 4,
-                "career_name": "Matemática Aplicada",
+                "career": "Matemática Aplicada",
                 "institution": "UNMSM",
                 "concordancia_score": 0.778,
                 "scores_by_criterion": {
@@ -2477,16 +2516,16 @@ Content-Type: application/json
                     "duracion": 0.82
                 },
                 "datos_verificables": {
-                    "ingreso_promedio": 2800,
-                    "costo_mensualidad": 80,
-                    "tasa_admision": 15,
-                    "duracion_anios": 5
+                    "monthly_income_imputed": 2800,
+                    "annual_cost_imputed": 80,
+                    "admission_rate_imputed": 15,
+                    "duration_years_imputed": 5
                 },
                 "explicacion": "Matemática Aplicada es la opción más accesible económicamente (S/. 80/mes) con altísima afinidad (90/100). Los ingresos son menores que otras opciones, pero ofrece flexibilidad para postgrados especializados. Recomendada si el presupuesto es una limitación importante."
             },
             {
                 "rank": 5,
-                "career_name": "Actuaría",
+                "career": "Actuaría",
                 "institution": "Pontificia Universidad Católica",
                 "concordancia_score": 0.742,
                 "scores_by_criterion": {
@@ -2497,10 +2536,10 @@ Content-Type: application/json
                     "duracion": 0.65
                 },
                 "datos_verificables": {
-                    "ingreso_promedio": 4100,
-                    "costo_mensualidad": 300,
-                    "tasa_admision": 40,
-                    "duracion_anios": 5
+                    "monthly_income_imputed": 4100,
+                    "annual_cost_imputed": 300,
+                    "admission_rate_imputed": 40,
+                    "duration_years_imputed": 5
                 },
                 "explicacion": "Actuaría ofrece los ingresos más altos del ranking (S/. 4,100/mes), combinando matemáticas con aplicación en seguros y finanzas. Es menos selectiva que otras opciones, pero también es privada con costos elevados. Ideal si el potencial salarial es prioritario."
             }
@@ -2589,9 +2628,10 @@ CREATE TABLE IF NOT EXISTS feedback (
     
     -- Entrada del usuario
     user_input TEXT NOT NULL,
-    user_input_region VARCHAR(100),
+    user_input_location VARCHAR(100),  -- región/ubicación (columna features.csv: location)
     user_input_budget_max DECIMAL(10,2),
-    user_input_institution_type VARCHAR(20),
+    user_input_management_type VARCHAR(20),  -- 'Pública' | 'Privada' (antes tipo_institucion)
+    -- NOTA: institution_type (Universidad/Instituto) es un campo distinto en features.csv
     
     -- Perfil interpretado (JSON)
     profile_riasec_scores JSONB,  -- {"R": 8, "I": 9, ...}
@@ -2652,20 +2692,20 @@ Atributos:
   
   Atributos principales:
     name (S)                   — "Universidad Nacional Mayor de San Marcos"
-    region (S)                 — "Lima"
-    tipo_institucion (S)       — "publica" | "privada"
+    location (S)               — "Lima" (antes region)
+    management_type (S)        — "Pública" | "Privada" (antes tipo_institucion)
     latitude (N)               — -12.0450
     longitude (N)              — -77.0822
     careers_ids (SS)           — {"estadistica_001", "ingenieria_civil_001", ...}
     website (S)                — "https://www.unmsm.edu.pe"
     contact_email (S)          — "admisiones@unmsm.edu.pe"
     
-GSI: region-index
-  PK: region (S)
+GSI: location-index
+  PK: location (S) (antes region)
   SK: institution_id (S)
   
 Permite queries tipo:
-  SELECT * FROM universities WHERE region = "Lima"
+  SELECT * FROM universities WHERE location = "Lima"
 ```
 
 ### SQLite (Demo Local)
@@ -2688,9 +2728,9 @@ CREATE TABLE feedback (
     ranking_id TEXT NOT NULL UNIQUE,
     
     user_input TEXT NOT NULL,
-    user_input_region TEXT,
+    user_input_location TEXT,  -- región/ubicación
     user_input_budget_max REAL,
-    user_input_institution_type TEXT,
+    user_input_management_type TEXT,  -- 'Pública' | 'Privada'
     
     profile_riasec_scores TEXT,  -- JSON serializado
     profile_w_afinidad REAL,
@@ -2730,10 +2770,10 @@ CREATE INDEX idx_feedback_ranking ON feedback(ranking_id);
 | `w_afinidad...w_duracion` | [0, 1], suma ≈ 1.0 |
 | `concordancia_score` | [0, 1] |
 | `validation_score` | [1, 5] entero |
-| `ingreso_promedio` | > 0 |
-| `costo_mensualidad` | ≥ 0 |
-| `tasa_admision` | [0, 90] % |
-| `duracion_anios` | [3, 7] años |
+| `monthly_income_imputed` | > 0 |
+| `annual_cost_imputed` | ≥ 0 |
+| `admission_rate_imputed` | [0, 90] % |
+| `duration_years_imputed` | [3, 7] años |
 | Timestamps | ISO 8601 UTC |
 
 ---
