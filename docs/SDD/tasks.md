@@ -1,8 +1,10 @@
-# Plan de Implementación: CareerMatch Perú — Agente de Orientación Vocacional (AWS)
+# Plan de Implementación: CareerMatch Perú — Matching Context (Scoring + Data Pipeline)
 
 ## Descripción General
 
-La implementación avanza en cinco fases estrictamente incrementales sobre AWS, cada una dejando el sistema en un estado funcional, integrado y validado: primero se construye el pipeline de datos (`data_loading` desde snapshot existente, `data_clean`, `feature_engineering`) y el `ScoringEngine` determinístico como fundación aislada sin dependencias externas; luego se implementa el flujo conversacional completo (Bloques A/B/C, interpretación LLM vía Bedrock, sesión en memoria) como servicio funcional de punta a punta con fixtures locales en un solo FastAPI; después se agregan persistencia (Aurora PostgreSQL), georreferencia (DynamoDB) y sesión por `session_id` anónimo — todo desde el mismo servicio FastAPI para la demo (la arquitectura Lambda + Fargate + API Gateway queda como meta de producción, ver ADR-001); luego se añaden capacidades secundarias opcionales (RAG con pgvector, embeddings Bedrock Titan, visualización de mapa); y finalmente se cierra con etiquetado RIASEC a escala completa (554 carreras únicas vía Bedrock batch + join a las 6,208 filas), tests de integración con fixtures reales, validación de propiedades de corrección y documentación final. Cada fase termina con un checkpoint explícito que verifica progreso integrado e inspecciona antes de continuar.
+**Alcance de este documento: solo Matching Context (scoring determinístico en Python 3.12 Lambda) + Data Pipeline.** Los contextos Identity, Assessment, Career y AI Advisor se implementan en otros repositorios/stacks (ver `design.md` § 2.2). Este plan NO cubre el backend completo.
+
+La implementación avanza en cinco fases incrementales sobre AWS, cada una dejando el Matching Context en un estado funcional e integrado: primero se construye el pipeline de datos (`data_loading` desde snapshot existente, `data_clean`, `feature_engineering`) y el `ScoringEngine` determinístico como fundación aislada sin dependencias externas; luego se implementa el flujo de scoring con fixtures locales en FastAPI (solo desarrollo local); después se agregan persistencia (Aurora PostgreSQL) y georreferencia (DynamoDB); luego capacidades secundarias opcionales (RAG con pgvector, embeddings Bedrock Titan); y finalmente se cierra con etiquetado RIASEC a escala completa (554 carreras únicas vía Bedrock batch + join a las 6,208 filas), tests de integración con fixtures reales, validación de propiedades de corrección y documentación final. Cada fase termina con un checkpoint explícito que verifica progreso integrado e inspecciona antes de continuar.
 
 ## Tareas
 
@@ -21,7 +23,7 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - NOTA: `JWT_SECRET` y `JWT_ALGORITHM` son obligatorios y deben coincidir con los que usa Identity Context (Secrets Manager compartido, no un secreto propio del servicio de scoring/chat).
   - [ ] 1.4 Crear `pytest.ini` con configuración: `testpaths = tests`, `python_files = test_*.py`, `asyncio_mode = auto`, `addopts = --tb=short -v`, markers para `unit`, `integration`, `property`. Configurar `.coveragerc` con `source = backend, data_pipeline`, umbrales mínimos 60%.
   - [ ] 1.5 Crear `README.md` inicial con: descripción del proyecto, instrucciones de instalación (`uv sync`), guía de variables de entorno, estructura de directorios, fases de desarrollo, y comandos para ejecutar tests (`uv run pytest tests/ --cov`).
-  - [ ] 1.6 Crear `Dockerfile` para servicio Fargate: imagen `python:3.10-slim`, instalar `uv` vía `COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/`, instalar dependencias de sistema (`gcc`, `postgresql-client`), copiar `pyproject.toml` y `uv.lock`, ejecutar `uv sync --no-dev`, exponer puerto 8000, healthcheck para `/health`, entrypoint `uv run uvicorn backend.app:app --host 0.0.0.0 --port 8000`.
+  - [ ] 1.6 Crear `Dockerfile` para desarrollo local del Matching Context: imagen `python:3.10-slim`, instalar `uv` vía `COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/`, instalar dependencias de sistema (`gcc`, `postgresql-client`), copiar `pyproject.toml` y `uv.lock`, ejecutar `uv sync --no-dev`, exponer puerto 8000, healthcheck para `/health`, entrypoint `uv run uvicorn backend.app:app --host 0.0.0.0 --port 8000`. NOTA: Este Dockerfile es solo para desarrollo local del Matching Context, NO para el backend completo.
   - [ ] 1.7 Crear `docker-compose.yml` para desarrollo local: servicio `backend` (imagen from Dockerfile, ports 8000:8000, env vars, volumes para código y datos), servicio `postgres_db` (imagen postgres:15-alpine, ports 5432:5432, env POSTGRES_USER/PASSWORD/DB), volumen `postgres_data`, red `careermatch_net`.
 
 ---
@@ -261,7 +263,7 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
 
 ---
 
-## Fase 2 — Flujo Conversacional Principal (Alta): Agente End-to-End sobre Fixtures, sin Persistencia Real
+## Fase 2 — Flujo de Scoring Local (Alta): Matching Context sobre Fixtures, sin Persistencia Real
 
 - [ ] 8. Implementar `backend/llm_service.py` — LLM_Layer (Amazon Bedrock Claude)
   - [ ] 8.1 Implementar clase `LLMService`:
@@ -408,7 +410,7 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - Invariante: `confidence_score` nunca disminuye.
     - Verificar con `hypothesis`: generar 100 secuencias aleatorias.
 
-- [ ] 11. Implementar `backend/app.py` — FastAPI Entrypoint (Fargate)
+- [ ] 11. Implementar `backend/app.py` — FastAPI Entrypoint (desarrollo local Matching Context)
   - [ ] 11.1 Implementar fixture de FastAPI:
     - `app = FastAPI(title="CareerMatch Perú Agent API")`.
     - Variable global `orchestration = None` (inicializada en startup).
@@ -443,7 +445,7 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - Loguea "Application initialized".
   - [ ] 11.6 Implementar endpoint `GET /health`:
     - Retorna `{status: "ok"}`.
-    - Usado para health check de Fargate.
+    - Usado para health check del servicio local.
   - [ ] 11.7 Tests de integración: `test_app_chat_flow.py`:
     - Usa `TestClient` de FastAPI.
     - Fixture: cargar `tests/fixtures/features_50_careers.csv` (50 carreras, 10 con RIASEC semilla).
@@ -476,9 +478,7 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
 
 ---
 
-## Fase 3 — Persistencia y Backend Completo (Alta): Aurora, DynamoDB, Sesión Anónima (un solo FastAPI para la demo)
-
-> ⚠ **Arquitectura para la demo:** Todos los endpoints (`/chat`, `/feedback`, `/universities`) se sirven desde un mismo FastAPI. Las tareas de infraestructura Lambda/API Gateway/VPC Link (13.3, partes de 17, 19.2) están marcadas como **`(Pospuesto — producción)`** y quedan fuera del alcance de la demo. La migración a Lambda+Fargate+API Gateway se hará post-demo si la carga lo justifica (ver ADR-001 en design.md § 2.2).
+## Fase 3 — Persistencia y Matching Context Completo (Alta): Aurora, DynamoDB, Infraestructura Compartida
 
 - [ ] 13. Configurar Infraestructura AWS Base
   - [ ] 13.1 Crear tabla Aurora PostgreSQL vía AWS Console o AWS CLI:
@@ -497,8 +497,12 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - PK: `institution_id` (String).
     - Atributos: `name`, `location` (antes region), `management_type` (Pública/Privada, antes tipo_institucion), `latitude`, `longitude`, `careers_ids` (StringSet).
     - GSI: `location-index` (PK: `location`, SK: `institution_id`).
-  - [ ] (Pospuesto — producción) 13.3 Crear repositorio ECR: `careermatch-repo` en región `us-east-1`.
-    - NOTA: ECR es necesario solo para el despliegue Lambda+Fargate de producción. Para la demo con un solo FastAPI, la imagen se construye localmente vía `docker-compose`.
+  - [ ] 13.3 Consumir infraestructura compartida existente en lugar de crear desde cero:
+    - Leer SSM Parameters existentes: `AURORA_ENDPOINT`, `DYNAMODB_TABLE_UNIVERSITIES`, `EVENT_BUS_NAME` desde AWS Systems Manager Parameter Store.
+    - Leer `JWT_SECRET` desde Secrets Manager (compartido con Identity Context).
+    - No crear EventBridge bus propio; usar `spark-match-events` existente.
+    - Configurar permisos Lambda para publicar en EventBridge existente.
+    - NOTA: No crear Aurora, DynamoDB ni EventBridge desde este plan. Consumir los ya existentes.
 
 - [ ] 14. Implementar `infra/db_schema.sql` — Esquema Aurora PostgreSQL
   - [ ] 14.1 Crear tabla `career_chunks` (para RAG, pgvector):
@@ -651,7 +655,7 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - PK: `institution_id` (S).
     - Atributos: `name` (S), `location` (S, antes region), `management_type` (S, Pública/Privada, antes tipo_institucion), `latitude` (N), `longitude` (N), `careers_ids` (SS).
     - GSI: `location-index` con PK=`location`, SK=`institution_id`.
-    - NOTA: Para la demo, se puede usar DynamoDB local (moto) o un stub JSON. La tabla AWS se crea solo para producción.
+    - NOTA: La tabla DynamoDB ya existe en AWS. Para desarrollo local, usar DynamoDB local (moto) o stub JSON.
     _Requerimientos: 9.3_
   - [ ] (Pospuesto — producción) 19.2 Implementar `backend/lambda/universities_handler.py`:
     - Endpoint `GET /universities?location=Lima` (querystring optional).
@@ -855,12 +859,12 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
 
 - [ ] 28. Documentación Final y README
   - [ ] 28.1 Actualizar `README.md`:
-    - Descripción clara del proyecto.
-    - Arquitectura (demo vs producción):
-      - **Demo**: Un solo FastAPI sirve `/chat`, `/feedback`, `/universities`. Sesión anónima en memoria. PostgreSQL local.
-      - **Producción (meta)**: Lambda + Fargate + API Gateway. Aurora PostgreSQL, DynamoDB, Bedrock.
-      - Lambda: `/session/create`, `/feedback`, `/universities` (stateless).
-      - Fargate: `/chat` (stateful, sesiones en memoria).
+    - Descripción clara del proyecto (solo Matching Context + Data Pipeline).
+    - Arquitectura real:
+      - API Gateway v2 (HTTP) enruta a Lambdas por contexto (Identity/Assessment/Career en TypeScript, Matching en Python).
+      - EventBridge (`spark-match-events`) para handlers async.
+      - AI Advisor: servicio Python separado (repo `08-deep-agent`) para chat+RAG.
+      - Matching Context (este repo): scoring determinístico en Python 3.12 Lambda.
       - Aurora PostgreSQL: persistencia (feedback, rankings, pgvector).
       - DynamoDB: georreferencia (universities).
       - Bedrock: LLM (Claude) + Embeddings (Titan).
@@ -886,14 +890,14 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - Justificación de decisiones AWS (Bedrock vs OpenAI, Aurora vs DynamoDB, etc.).
     - Links a design.md y requirements.
   - [ ] 28.4 Crear `docs/DEPLOYMENT.md`:
-    - Guía de despliegue a AWS:
-      - Crear Aurora cluster.
-      - Crear DynamoDB table.
-      - Crear ECR repository.
-      - Build + push Docker image.
-      - Deploy Lambda functions (via SAM o Terraform).
-      - Deploy Fargate service (via ECS/Terraform).
-      - Configurar API Gateway.
+    - Guía de despliegue del Matching Context en AWS:
+      - Consumir Aurora cluster existente (no crear).
+      - Consumir DynamoDB table existente (no crear).
+      - Configurar Lambda (Python 3.12) para Matching Context.
+      - Conectar a EventBridge bus existente (`spark-match-events`).
+      - Leer SSM Parameters y Secrets Manager existentes.
+      - Build + push Docker image (solo para desarrollo local).
+      - Configurar API Gateway v2 routes hacia Lambdas por contexto.
     - Checklist de verificación post-deploy.
 
 - [ ] 29. Checkpoint Final — Validación Integral del Sistema
@@ -946,20 +950,20 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
 
 - **Restricciones transversales** (heredadas de `design.md` § Restricciones Transversales):
   - Package manager: `uv` (NO Poetry, NO Conda, NO pip puro).
-  - Framework servicio principal (demo): `FastAPI` + `Uvicorn` (todos los endpoints en un solo servicio) (NO Flask, NO Django).
+  - Framework servicio local (desarrollo Matching Context): `FastAPI` + `Uvicorn` (NO Flask, NO Django).
   - Framework Lambda (producción): `boto3` puro (NO frameworks adicionales como `zappa`).
   - Credenciales: ÚNICAMENTE vía variables de entorno o AWS Secrets Manager (NUNCA hardcoded, NUNCA en código).
   - LLM: ÚNICAMENTE Bedrock/Claude (NO Gemini, NO OpenAI en este ciclo).
   - Embeddings: ÚNICAMENTE Bedrock Titan (NO sentence-transformers local, NO OpenAI).
   - Vector DB: ÚNICAMENTE pgvector en Aurora (NO FAISS local, NO Pinecone, NO Chroma).
 
-- **Sesión conversacional**: Vive **en memoria dentro del proceso Fargate** con TTL simple (1800s), decisión explícita para demo. NO introduce Redis ni DynamoDB para sesiones.
+- **Sesión conversacional**: La sesión conversacional vive en el AI Advisor (repo `08-deep-agent`), no en el Matching Context. Para Matching Context, el JWT del Identity Context se valida en cada invocación Lambda. NO hay estado de sesión en memoria en este contexto.
 
 - **Autenticación JWT (2.2)**: Todo turno de `/chat` requiere un JWT válido emitido por el Identity Context existente (TypeScript/Lambda con endpoints `register`/`login`/`users/me`). No existe `session_id` anónimo. El backend FastAPI valida el JWT con `PyJWT.decode()` usando el secreto compartido desde Secrets Manager. El Identity Context es una dependencia obligatoria del sistema; sin él, el servicio de scoring/chat no puede operar. Google OAuth es una extensión futura posible.
 
-- **Un solo servicio para la demo (2.3)**: Todos los endpoints (`/chat`, `/feedback`, `/universities`) se sirven desde el mismo FastAPI. La arquitectura Lambda + Fargate + API Gateway (diagrama en design.md § 2.1) es la **meta de producción** (ver ADR-001). Las tareas de infraestructura Lambda (13.3, 17, 19.2) y handlers Lambda están marcadas como `(Pospuesto — producción)` y quedan fuera del alcance de la demo. La migración se evalúa post-demo si la carga lo justifica.
+- **Matching Context es solo una pieza (2.3)**: Este plan cubre únicamente Matching Context (scoring determinístico Python 3.12 Lambda) + Data Pipeline. Identity, Assessment, Career y AI Advisor se implementan en otros repositorios. El `Dockerfile`/`docker-compose.yml` son solo para desarrollo local del Matching Context, no para el backend completo.
 
-- **Etiquetado RIASEC** (6,208 carreras): Corre como **job batch** (AWS Batch o Fargate task, NO Lambda) por duración de llamadas Bedrock (potencialmente horas). Pipeline automatizado genera snapshot versionado. Validación muestral (300 carreras) es paso humano externo, pero export CSV es responsabilidad pipeline (tarea 25.2).
+- **Etiquetado RIASEC** (6,208 carreras): Corre como **job batch** (AWS Batch, NO Lambda) por duración de llamadas Bedrock (potencialmente horas). Pipeline automatizado genera snapshot versionado. Validación muestral (300 carreras) es paso humano externo, pero export CSV es responsabilidad pipeline (tarea 25.2).
 
 - **Fases son incrementales e integradas**: Cada una termina con checkpoint que verifica estado funcional. Fase N depende de trabajo de Fase N-1 pero NO rompe su funcionalidad. Puntos de integración y reemplazos están explícitos (ej Tarea 18.1: "Modificar endpoint").
 
@@ -969,4 +973,4 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
 
 - **Trazabilidad obligatoria**: Cada subtarea de implementación tiene `_Requerimientos: X.Y_`. Cada criterio (R1–R10, C1–C7) aparece en al menos una. Tests tienen referencias explícitas a propiedades (negrita) o requerimientos.
 
-- **Orden de tareas respeta dependencias reales**: Data pipeline (Fase 1) antes de LLM (Fase 2). Scoring determinístico antes de Orchestration. LLM antes de Fargate endpoint. Auth y persistencia (Fase 3) antes de Lambda handlers. RAG (Fase 4, opcional) después de todo funcional. Batch (Fase 5) último.
+- **Orden de tareas respeta dependencias reales**: Data pipeline (Fase 1) antes del Scoring local (Fase 2). Scoring determinístico antes de persistencia. Auth y persistencia (Fase 3) antes de RAG (Fase 4, opcional). Batch (Fase 5) último.
