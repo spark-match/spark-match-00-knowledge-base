@@ -45,10 +45,12 @@ API Gateway v2 (HTTP)
 │                         universidades, georreferencia, filtering
 │
 ├→ /v1/matching/*      → Lambda (Matching Context, Python 3.12)
+│                         GET /v1/match/recommendations?userId={id}
+│                         GET /v1/match/{careerId}/affinity?userId={id}
 │                         Scoring_Engine (determinístico, este repo)
 │
 ├→ EventBridge (spark-match-events)
-│   ├→ Handler: feedback persistence (Aurora PostgreSQL)
+│   ├→ Handler: persistence de ranking + feedback (Aurora PostgreSQL, este repo)
 │   ├→ Handler: notification / analytics
 │   └→ Handler: pipeline triggers
 │
@@ -87,7 +89,7 @@ El backend se organiza en contextos, cada uno con su propio stack:
 | **Identity** | TypeScript/Node.js 20 | Lambda | Auth (register/login/JWT), perfiles de usuario |
 | **Assessment** | TypeScript/Node.js 20 | Lambda | RIASEC tagging, interpretación de preferencias |
 | **Career** | TypeScript/Node.js 20 | Lambda | Catálogo de carreras, `CareerOffering` (carrera×universidad con métricas), georreferencia, emisión de `CareerCreated`/`CareerUpdated` |
-| **Matching** | Python 3.12 | Lambda | Scoring determinístico, ranking, feedback persistence |
+| **Matching** | Python 3.12 | Lambda | Scoring determinístico, ranking (`GET /v1/match/recommendations`, `GET /v1/match/{careerId}/affinity`), persistencia de ranking+feedback (event handler EventBridge) |
 | **AI Advisor** | Python (FastAPI + LangGraph) | Servicio dedicado (repo `08-deep-agent`) | Chat conversacional, RAG, orquestación LLM |
 
 > **Nota sobre Matching Context (este repo):** Solo Matching (scoring determinístico con Python 3.12 Lambda) y Data Pipeline corresponden a este documento. Identity, Assessment, Career y AI Advisor se implementan en otros repositorios/stacks. El `Dockerfile` y `docker-compose.yml` existentes son válidos únicamente para desarrollo local del Matching Context y del data pipeline; ya no describen "el backend completo".
@@ -133,9 +135,10 @@ El diseño original planteaba Fargate para el chat porque "Lambda no es adecuado
 | **R7 — LLM** | 7.1 Interpretación Bloques A/B/C | `AI Advisor` (repo `08-deep-agent`, FastAPI + LangGraph) |
 | | 7.2 Validación JSON 3 reintentos | `AI Advisor._parse_and_validate_json` |
 | | 7.3 Generación explicaciones | `AI Advisor.generate_explanation` |
-| **R8 — Backend** | 8.1 Lambda `/feedback` + `/universities` | 2 handlers (Matching Context) |
-| | 8.2 Lambda `matching/handle_completed` + EventBridge I/O | `ScoringEngine.rank_and_filter` reactivo |
-| | 8.3 JWT sin estado compartido | JWT validado en API Gateway v2 (edge) + Powertools en cada Lambda |
+| **R8 — Backend** | 8.1 REST endpoints de Matching | `GET /v1/match/recommendations` + `GET /v1/match/{careerId}/affinity` (Lambda + Powertools) |
+| | 8.2 Event handler `AssessmentCompleted` → `RecommendationGenerated` | `ScoringEngine.rank_and_filter` reactivo |
+| | 8.3 Feedback persistence (event handler asíncrono, no REST) | `FeedbackStorage` en Aurora |
+| | 8.4 JWT sin estado compartido | JWT validado en API Gateway v2 (edge) + Powertools en cada Lambda |
 | **R9 — Persistencia** | 9.1 Aurora: feedback, rankings aislados | `FeedbackRecord` + índices |
 | | 9.2 pgvector Aurora: career_chunks (schema `ai`, pendiente verificar nombre/dimensión real) | `career_chunks` tabla (tentativa) |
 | | 9.3 Aurora: `career.career_offerings` (carrera×universidad) | `CareerOffering` + índices (location, institution) |
@@ -149,8 +152,8 @@ El diseño original planteaba Fargate para el chat porque "Lambda no es adecuado
 ## Restricciones Transversales
 
 - **Package manager:** `uv` (no Poetry/Conda, no pip puro).
-- **Framework Lambda (Python):** `boto3` puro (sin frameworks adicionales como `zappa`).
-- **Framework servicio local (Matching Context):** FastAPI + Uvicorn (solo desarrollo local).
+- **Framework Lambda (Python):** AWS Lambda Powertools for Python (logger, tracer, metrics) + `boto3` para servicios AWS.
+- **Framework servicio local (Matching Context):** FastAPI + Uvicorn (solo desarrollo local, no para producción).
 - **Cobertura tests:** ≥ 60% en `scoring`, `data_pipeline`.
 - **Credenciales:** Variables de entorno / AWS Secrets Manager (nunca hardcodeadas).
 ---
@@ -1315,25 +1318,24 @@ def lambda_handler(event: dict, context: object) -> dict:
     pass  # Implementación en tasks.md Tarea 10.x
 ```
 
-### `backend/lambda/feedback_handler.py` — Feedback Persistence Handler
+### `backend/lambda/feedback_handler.py` — Feedback Persistence Handler (event-driven)
 
-**Responsabilidad:** Persistir validación del usuario (Likert 1–5) en Aurora PostgreSQL. Invocado por API Gateway v2 (ruta `POST /feedback`).
+**Responsabilidad:** Persistir validación del usuario (Likert 1–5) en Aurora PostgreSQL. Consume eventos `FeedbackSubmitted` desde EventBridge — **no es un endpoint REST**.
 
 ```python
 def lambda_handler(event: dict, context: object) -> dict:
     """
-    Lambda handler para POST /feedback.
+    Lambda handler para eventos FeedbackSubmitted desde EventBridge.
     
     Flujo:
-    1. Extraer JWT del header Authorization
-    2. Validar JWT (PyJWT.decode con secreto compartido)
-    3. Parsear body: { rankingId, validationScore, selectedCareer, notes }
-    4. Validar validationScore ∈ [1, 5]
-    5. Persistir en Aurora (tabla feedback)
-    6. Retornar {statusCode: 200, body: {status: "success"}}
+    1. Validar event["detail-type"] == "FeedbackSubmitted"
+    2. Parsear event["detail"]: { userId, rankingId, validationScore, selectedCareer, notes }
+    3. Validar validationScore ∈ [1, 5]
+    4. Persistir en Aurora PostgreSQL (tabla feedback)
+    5. Retornar {statusCode: 200}
     
     Errores:
-    - 401 si JWT inválido
+    - 400 si detail-type incorrecto
     - 422 si validationScore fuera de rango
     - 500 si DB error
     """
@@ -1343,18 +1345,18 @@ def lambda_handler(event: dict, context: object) -> dict:
 **Notas de comportamiento:**
 - No existe clase `Orchestration` monolítica; la coordinación es vía eventos.
 - `ScoringEngine` se ejecuta como Lambda handler asíncrono (no en el mismo request HTTP).
-- Feedback persistence se maneja en Lambda dedicado (no en el flujo de chat).
+- Feedback persistence se maneja en Lambda dedicado, consumiendo eventos desde EventBridge.
 - El chat conversacional y la interpretación LLM viven en AI Advisor (repo `08-deep-agent`).
 
 ---
-
 ### `backend/app.py` — FastAPI Entrypoint (desarrollo local Matching Context)
 
-> **NOTA:** Este entrypoint es solo para desarrollo local del Matching Context. En producción, los handlers son Lambdas individuales invocados por API Gateway v2. El endpoint `/chat` vive en el AI Advisor (repo `08-deep-agent`).
+> **NOTA:** Este entrypoint es solo para desarrollo local del Matching Context. En producción, los handlers son Lambdas individuales invocados por API Gateway v2, implementados con AWS Lambda Powertools for Python (logger, tracer, metrics). Los endpoints `/v1/chat/conversations/*` viven en el AI Advisor (repo `08-deep-agent`).
 
 ```python
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 import logging
+from typing import Optional
 
 app = FastAPI(title="CareerMatch Perú — Matching Context (local dev)")
 logger = logging.getLogger("careermatch")
@@ -1362,36 +1364,104 @@ logger = logging.getLogger("careermatch")
 # Variable global (inicializada en startup)
 scoring_engine = None
 
-@app.post("/v1/matching/score")
-async def endpoint_score(
-    request: dict,  # {riasec_scores, weights, filters, userId}
-) -> dict:
+@app.get("/v1/match/recommendations")
+async def get_recommendations(
+    userId: str = Query(..., description="User ID (JWT sub)"),
+):
     """
-    POST /v1/matching/score
+    GET /v1/match/recommendations?userId={userId}
     
-    Simula localmente lo que el Lambda matching_handler hace en producción.
-    Recibe perfil completo, ejecuta ScoringEngine, retorna Top-5.
-    HTTP 200 con ranking, 500 si error interno.
+    Retorna el Top-5 de carreras recomendadas para el usuario.
+    En producción, este endpoint es invocado por API Gateway v2
+    y el handler usa Powertools (logger, tracer, metrics).
+    
+    HTTP 200 con ranking, 404 si no hay recomendaciones, 500 si error interno.
     """
     try:
-        profile = StudentProfile(
-            riasec_scores=request.get("riasec_scores"),
-            w_afinidad=request["weights"].get("w_afinidad"),
-            w_ingreso=request["weights"].get("w_ingreso"),
-            w_costo=request["weights"].get("w_costo"),
-            w_admision=request["weights"].get("w_admision"),
-            w_duracion=request["weights"].get("w_duracion"),
-            location=request["filters"].get("location"),
-            management_type=request["filters"].get("management_type"),
-            presupuesto_max=request["filters"].get("presupuesto_max"),
-            modalidad=request["filters"].get("modalidad"),
-        )
+        # Buscar el último AssessmentCompleted para este usuario
+        # (en desarrollo local, se recibe por body o se consulta en DB)
         ranked = scoring_engine.rank_and_filter(profile, scoring_engine.features_df)
         top_5 = scoring_engine.get_top_n(ranked, 5)
-        return {"status": "success", "top_5": top_5}
+        
+        return {
+            "status": "success",
+            "userId": userId,
+            "recommendations": top_5,
+            "rankingId": str(uuid.uuid4()),
+            "snapshot_id": os.getenv("SNAPSHOT_ID", "latest"),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except ValueError:
+        raise HTTPException(status_code=404, detail="No se encontraron recomendaciones")
     except Exception as e:
-        logger.error(f"Error en /score: {e}", exc_info=True)
-        return {"status": "error", "error_message": "Error interno del servidor"}
+        logger.error(f"Error en /recommendations: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
+
+@app.get("/v1/match/{careerId}/affinity")
+async def get_career_affinity(
+    careerId: str,
+    userId: str = Query(..., description="User ID (JWT sub)"),
+):
+    """
+    GET /v1/match/{careerId}/affinity?userId={userId}
+    
+    Retorna desglose de afinidad para una carrera específica.
+    
+    HTTP 200 con desglose, 404 si carrera no encontrada, 500 si error interno.
+    """
+    try:
+        # Buscar la carrera por ID en el dataset
+        career_row = scoring_engine.features_df[
+            scoring_engine.features_df["id"] == careerId
+        ]
+        
+        if career_row.empty:
+            raise HTTPException(status_code=404, detail="Carrera no encontrada")
+        
+        row = career_row.iloc[0]
+        affinity_score = scoring_engine.calculate_affinity(
+            profile.riasec_code,
+            row["riasec_profile"]
+        )
+        
+        return {
+            "status": "success",
+            "userId": userId,
+            "careerId": careerId,
+            "career": row["career"],
+            "institution": row["institution"],
+            "affinity": {
+                "student_riasec_code": profile.riasec_code,
+                "career_riasec_profile": row["riasec_profile"],
+                "affinity_score": affinity_score,
+                "scores_by_criterion": {
+                    "afinidad": affinity_score,
+                    "ingreso": float(row["income_norm"]),
+                    "costo": float(row["cost_norm"]),
+                    "admision": float(row["admission_norm"]),
+                    "duracion": float(row["duration_norm"])
+                },
+                "concordancia_score": scoring_engine.calculate_score(
+                    profile.weights,
+                    affinity_score,
+                    row["income_norm"],
+                    row["cost_norm"],
+                    row["admission_norm"],
+                    row["duration_norm"]
+                )
+            },
+            "verifiable_data": {
+                "monthly_income_imputed": float(row["monthly_income_imputed"]),
+                "annual_cost_imputed": float(row["annual_cost_imputed"]),
+                "admission_rate_imputed": float(row["admission_rate_imputed"]),
+                "duration_years_imputed": float(row["duration_years_imputed"])
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error en /affinity: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 @app.get("/health")
 async def health():
@@ -1413,14 +1483,16 @@ async def startup():
 
 ### `frontend/app.js` — Gestor de Aplicación (demo, JWT desde Identity Context)
 
+> **NOTA sobre endpoints:** El chat y la interpretación LLM viven en AI Advisor (`/v1/chat/conversations/*`). Matching Context solo expone `GET /v1/match/recommendations` y `GET /v1/match/{careerId}/affinity`. El feedback se envía mediante evento al AI Advisor, que emite un evento `FeedbackSubmitted` a EventBridge, consumido por Matching Context. No existe endpoint `POST /feedback`.
+
 ```javascript
 class CareerMatchApp {
     constructor() {
         this.jwt = null;
         this.userId = null;
-        this.identityBaseUrl = "https://api.careermatch.pe/v1/auth";    // Identity Context
-        this.advisorBaseUrl = "https://api.careermatch.pe/v1/advisor";  // AI Advisor
-        this.matchingBaseUrl = "https://api.careermatch.pe/v1/matching";// Matching Context
+        this.identityBaseUrl = "https://api.careermatch.pe/v1/auth";       // Identity Context
+        this.advisorBaseUrl = "https://api.careermatch.pe/v1/advisor";     // AI Advisor
+        this.matchBaseUrl = "https://api.careermatch.pe/v1/match";         // Matching Context
     }
 
     async init() {
@@ -1433,7 +1505,6 @@ class CareerMatchApp {
     }
 
     async redirectToLogin() {
-        // Redirige al frontend del Identity Context para login/register
         window.location.href = "/login.html";
     }
 
@@ -1444,7 +1515,7 @@ class CareerMatchApp {
         
         try {
             // El chat lo maneja el AI Advisor (repo 08-deep-agent)
-            const response = await fetch(`${this.advisorBaseUrl}/chat`, {
+            const response = await fetch(`${this.advisorBaseUrl}/chat/conversations`, {
                 method: "POST",
                 headers: {
                     "Authorization": `Bearer ${this.jwt}`,
@@ -1474,10 +1545,29 @@ class CareerMatchApp {
         }
     }
 
-    async sendFeedback(rankingId, score, selectedCareer, notes) {
-        // Feedback va directo a Matching Context (Lambda handler)
+    async loadRecommendations() {
+        // Matching Context: GET /v1/match/recommendations
         try {
-            const response = await fetch(`${this.matchingBaseUrl}/feedback`, {
+            const response = await fetch(
+                `${this.matchBaseUrl}/recommendations?userId=${this.userId}`,
+                {
+                    headers: { "Authorization": `Bearer ${this.jwt}` }
+                }
+            );
+            const data = await response.json();
+            if (data.status === "success") {
+                this.rankingId = data.rankingId;
+                this.displayRanking(data.recommendations);
+            }
+        } catch (error) {
+            console.error("Error al cargar recomendaciones:", error);
+        }
+    }
+
+    async sendFeedback(rankingId, score, selectedCareer, notes) {
+        // Feedback se envía al AI Advisor, que emite FeedbackSubmitted a EventBridge
+        try {
+            const response = await fetch(`${this.advisorBaseUrl}/feedback`, {
                 method: "POST",
                 headers: {
                     "Authorization": `Bearer ${this.jwt}`,
@@ -1489,7 +1579,7 @@ class CareerMatchApp {
                 })
             });
             const data = await response.json();
-            console.log("Feedback guardado:", data);
+            console.log("Feedback enviado:", data);
         } catch (error) {
             console.error("Error al enviar feedback:", error);
         }
@@ -1497,7 +1587,6 @@ class CareerMatchApp {
 
     displayRanking(topN) {
         // Renderizar Top-5 ranking con datos verificables
-        // Incluir botones Likert para feedback
     }
 
     appendMessage(text, role) {
@@ -1505,7 +1594,7 @@ class CareerMatchApp {
     }
 
     attachEventListeners() {
-        // Event listeners para botones
+        // Event listeners
     }
 }
 ```
@@ -2185,57 +2274,40 @@ class FeedbackRecord:
 
 ---
 
-### `ChatResponse` (respuesta de `/chat`)
+### `RecommendationsResponse` (respuesta de `GET /v1/match/recommendations`)
 
 ```python
-class ChatResponse:
-    """Respuesta de endpoint POST /chat."""
+class RecommendationsResponse:
+    """Respuesta de GET /v1/match/recommendations."""
     
     status: str  # "success" | "error"
-    
-    conversation: dict  # {
-                         #   turn: 1,
-                         #   bot_message: "¿Hay región donde prefieras...?",
-                         #   requires_follow_up: true
-                         # }
-    
-    ranking: dict | None  # {
-                           #   status: "ready" | "awaiting_info",
-                           #   top_5: [RankingItem, ...] | None
-                           # }
-    
-    rag_available_for: list[str]  # ["Estadística", "Ingeniería Civil"] — carreras con RAG
-    
-    ranking_id: str | None  # UUID si ranking listo, None si sigue preguntando
-    
-    error_message: str | None  # "Token inválido" o None si éxito
+    userId: str  # JWT sub
+    recommendations: list[dict]  # Top-5 [RankingItem, ...]
+    rankingId: str  # UUID
+    snapshot_id: str  # features_{timestamp}
+    timestamp: str  # ISO 8601
 ```
 
 ---
 
-### `RagResponse` (respuesta de `/rag`)
+### `CareerAffinityResponse` (respuesta de `GET /v1/match/{careerId}/affinity`)
 
 ```python
-class RagResponse:
-    """Respuesta de endpoint POST /rag."""
+class CareerAffinityResponse:
+    """Respuesta de GET /v1/match/{careerId}/affinity."""
     
-    answer: str  # Respuesta generada por LLM + contexto RAG
-    sources: list[str]  # Documentos citados (ej ["Plan Curricular Oficial UNMSM"])
-    confidence: float  # [0, 1]
-    status: str  # "success" | "no_documents" | "error"
+    status: str  # "success" | "error"
+    userId: str  # JWT sub
+    careerId: str  # UUID de la carrera
+    career: str  # Nombre de carrera
+    institution: str  # Nombre de universidad
+    affinity: dict  # { student_riasec_code, career_riasec_profile, affinity_score, ... }
+    verifiable_data: dict  # { monthly_income_imputed, annual_cost_imputed, ... }
 ```
 
 ---
 
-### `FeedbackResponse` (respuesta de `/feedback`)
-
-```python
-class FeedbackResponse:
-    """Respuesta de endpoint POST /feedback."""
-    
-    status: str  # "success" | "error"
-    message: str  # "Feedback guardado" o descripción de error
-```
+> **Nota:** No existen modelos `ChatResponse`, `RagResponse` ni `FeedbackResponse` en Matching Context. `ChatResponse` y `RagResponse` pertenecen al AI Advisor (repo `08-deep-agent`). `FeedbackResponse` no existe como endpoint REST — el feedback se procesa mediante EventBridge.
 
 ---
 
@@ -2652,226 +2724,123 @@ END FUNCTION
 
 ---
 
-## Diseño de API REST
+## Diseño de API REST (Matching Context)
 
-### Endpoint: POST /chat
+> ⚠️ **Nota sobre ownership de endpoints:** Los únicos endpoints REST que implementa este repositorio son los de **Matching Context** (`GET /v1/match/recommendations`, `GET /v1/match/{careerId}/affinity`). Los demás contextos tienen sus propios stacks:
+> - `/v1/auth/*`, `/v1/users/*` → **Identity Context** (TypeScript/Lambda, otro repo)
+> - `/v1/assessments/*` → **Assessment Context** (TypeScript/Lambda, otro repo)
+> - `/v1/careers/*` → **Career Context** (TypeScript/Lambda, otro repo)
+> - `/v1/chat/conversations/*` → **AI Advisor** (FastAPI + LangGraph, repo `08-deep-agent`)
+>
+> El endpoint `POST /feedback` **no existe como REST endpoint** en ningún contexto. El feedback se persiste mediante un **handler asíncrono de EventBridge** que consume eventos de validación emitidos por el AI Advisor o frontend. La tabla `feedback` en Aurora sí pertenece a este repositorio.
 
-**Request:**
-```json
-{
-    "message": "Me interesan las matemáticas y el análisis de datos",
-    "metadata": {
-        "location": null,         # Ubicación/región del estudiante
-        "budget_max": null,       # Presupuesto máximo ANUAL (soles), se compara con annual_cost_imputed
-        "management_type": null   # 'Pública' | 'Privada'
-    }                             # NOTA: budget_max es anual, NO mensual
-}
-```
+### Endpoint: `GET /v1/match/recommendations?userId={userId}`
+
+**Descripción:** Retorna el Top-5 de carreras recomendadas para un usuario, basado en su evaluación más reciente. Este endpoint es consumido por el frontend o el AI Advisor para presentar las recomendaciones.
 
 **Headers:**
 ```
 Authorization: Bearer {jwt_token}
-Content-Type: application/json
 ```
 
 **Response (200 OK):**
 ```json
 {
     "status": "success",
-    "conversation": {
-        "turn": 1,
-        "bot_message": "¡Excelente! Veo que te interesan áreas cuantitativas. Para darte mejores recomendaciones, ¿hay alguna región del Perú donde prefieras estudiar?",
-        "requires_follow_up": true
-    },
-    "ranking": {
-        "status": "awaiting_info",
-        "top_5": null
-    },
-    "rag_available_for": [],
-    "ranking_id": null,
-    "error_message": null
-}
-```
-
-**Response con Ranking (después de confianza >= 0.70):**
-```json
-{
-    "status": "success",
-    "conversation": {
-        "turn": 4,
-        "bot_message": "Perfecto, tengo una visión clara de lo que buscas. Aquí están mis 5 mejores recomendaciones:",
-        "requires_follow_up": false
-    },
-    "ranking": {
-        "status": "ready",
-        "top_5": [
-            {
-                "rank": 1,
-                "career": "Estadística",
-                "institution": "UNMSM",
-                "concordancia_score": 0.847,
-                "scores_by_criterion": {
-                    "afinidad": 0.85,
-                    "ingreso": 0.82,
-                    "costo": 0.90,
-                    "admision": 0.60,
-                    "duracion": 0.75
-                },
-                    "datos_verificables": {
-                        "monthly_income_imputed": 3200,
-                        "annual_cost_imputed": 100,
-                        "admission_rate_imputed": 18,
-                        "duration_years_imputed": 5
-                    },
-                    "explicacion": "Te recomendamos Estadística en la UNMSM porque tu afinidad con el análisis de datos es muy alta (85/100). Esta carrera ofrece uno de los mejores ingresos en el mercado (S/. 3,200/mes según datos del MINEDU) con un costo relativamente accesible. Aunque es selectiva (18% de admisión), es factible con tu fortaleza en matemáticas."
+    "userId": "uuid-del-usuario",
+    "recommendations": [
+        {
+            "rank": 1,
+            "career": "Estadística",
+            "institution": "UNMSM",
+            "concordancia_score": 0.847,
+            "scores_by_criterion": {
+                "afinidad": 0.85,
+                "ingreso": 0.82,
+                "costo": 0.90,
+                "admision": 0.60,
+                "duracion": 0.75
             },
-            {
-                "rank": 2,
-                "career": "Ingeniería Civil",
-                "institution": "UNI",
-                "concordancia_score": 0.812,
-                "scores_by_criterion": {
-                    "afinidad": 0.78,
-                    "ingreso": 0.88,
-                    "costo": 0.85,
-                    "admision": 0.65,
-                    "duracion": 0.70
-                },
-                "datos_verificables": {
-                    "monthly_income_imputed": 3500,
-                    "annual_cost_imputed": 120,
-                    "admission_rate_imputed": 22,
-                    "duration_years_imputed": 5
-                },
-                "explicacion": "Ingeniería Civil en la UNI es otra excelente opción. Combina razonamiento analítico con aplicaciones prácticas. Los ingresos son superiores (S/. 3,500/mes) y la demanda en el mercado es consistente. Un poco más selectiva que Estadística, pero muy accesible para estudiantes con tu perfil."
-            },
-            {
-                "rank": 3,
-                "career": "Ciencia de Datos",
-                "institution": "Pontificia Universidad Católica",
-                "concordancia_score": 0.795,
-                "scores_by_criterion": {
-                    "afinidad": 0.92,
-                    "ingreso": 0.85,
-                    "costo": 0.60,
-                    "admision": 0.70,
-                    "duracion": 0.68
-                },
-                "datos_verificables": {
-                    "monthly_income_imputed": 3100,
-                    "annual_cost_imputed": 280,
-                    "admission_rate_imputed": 35,
-                    "duration_years_imputed": 4
-                },
-                "explicacion": "Ciencia de Datos tiene la máxima afinidad con tu perfil (92/100) y es más nueva en el mercado. El programa es más corto (4 años) y menos selectivo. Sin embargo, es una institución privada con costos mayores (S/. 280/mes). Es ideal si buscas especialización rápida."
-            },
-            {
-                "rank": 4,
-                "career": "Matemática Aplicada",
-                "institution": "UNMSM",
-                "concordancia_score": 0.778,
-                "scores_by_criterion": {
-                    "afinidad": 0.90,
-                    "ingreso": 0.72,
-                    "costo": 0.92,
-                    "admision": 0.55,
-                    "duracion": 0.82
-                },
-                "datos_verificables": {
-                    "monthly_income_imputed": 2800,
-                    "annual_cost_imputed": 80,
-                    "admission_rate_imputed": 15,
-                    "duration_years_imputed": 5
-                },
-                "explicacion": "Matemática Aplicada es la opción más accesible económicamente (S/. 80/mes) con altísima afinidad (90/100). Los ingresos son menores que otras opciones, pero ofrece flexibilidad para postgrados especializados. Recomendada si el presupuesto es una limitación importante."
-            },
-            {
-                "rank": 5,
-                "career": "Actuaría",
-                "institution": "Pontificia Universidad Católica",
-                "concordancia_score": 0.742,
-                "scores_by_criterion": {
-                    "afinidad": 0.80,
-                    "ingreso": 0.92,
-                    "costo": 0.55,
-                    "admision": 0.68,
-                    "duracion": 0.65
-                },
-                "datos_verificables": {
-                    "monthly_income_imputed": 4100,
-                    "annual_cost_imputed": 300,
-                    "admission_rate_imputed": 40,
-                    "duration_years_imputed": 5
-                },
-                "explicacion": "Actuaría ofrece los ingresos más altos del ranking (S/. 4,100/mes), combinando matemáticas con aplicación en seguros y finanzas. Es menos selectiva que otras opciones, pero también es privada con costos elevados. Ideal si el potencial salarial es prioritario."
+            "verifiable_data": {
+                "monthly_income_imputed": 3200,
+                "annual_cost_imputed": 100,
+                "admission_rate_imputed": 18,
+                "duration_years_imputed": 5
             }
-        ]
-    },
-    "rag_available_for": ["Estadística", "Ingeniería Civil", "Ciencia de Datos"],
-    "ranking_id": "550e8400-e29b-41d4-a716-446655440000",
-    "error_message": null
+        }
+    ],
+    "rankingId": "550e8400-e29b-41d4-a716-446655440000",
+    "snapshot_id": "features_20260715_143022",
+    "timestamp": "2026-07-07T12:00:05Z"
 }
 ```
 
----
-
-### Endpoint: POST /feedback
-
-**Request:**
-```json
-{
-    "ranking_id": "550e8400-e29b-41d4-a716-446655440000",
-    "validation_score": 5,
-    "selected_career": "Estadística",
-    "notes": "Me gustó mucho. Voy a investigar más sobre esta carrera."
-}
-```
-
-**Response (200 OK):**
-```json
-{
-    "status": "success",
-    "message": "¡Gracias por tu feedback! Nos ayuda a mejorar nuestras recomendaciones."
-}
-```
-
-**Response (422 Unprocessable Entity):**
+**Response (404):**
 ```json
 {
     "status": "error",
-    "message": "validation_score debe estar entre 1 y 5"
+    "message": "No se encontraron recomendaciones para el usuario especificado"
 }
 ```
 
 ---
 
-### Endpoint: POST /rag
+### Endpoint: `GET /v1/match/{careerId}/affinity?userId={userId}`
 
-**Request:**
-```json
-{
-    "career": "Estadística",
-    "question": "¿Qué cursos lleva esta carrera?"
-}
+**Descripción:** Retorna el desglose de afinidad RIASEC para una carrera específica, permitiendo al usuario o AI Advisor entender por qué una carrera en particular fue recomendada (o no).
+
+**Headers:**
+```
+Authorization: Bearer {jwt_token}
 ```
 
 **Response (200 OK):**
 ```json
 {
-    "answer": "Estadística comprende cursos teóricos y aplicados divididos en bloques: \n\n1. Probabilidad y Cálculo (primer año): Cálculo I–III, Álgebra Lineal, Probabilidades. \n2. Estadística Matemática (segundo año): Inferencia Estadística, Muestreo, Teoría de Decisiones. \n3. Aplicaciones (tercero-cuarto año): Análisis Multivariante, Series de Tiempo, Modelos Lineales. \n4. Especialización (quinto año): Cursos electivos de análisis bayesiano, econometría, estadística computacional.",
-    "sources": ["Plan Curricular Oficial UNMSM 2024", "Catálogo de Cursos Requeridos"],
-    "confidence": 0.94,
-    "status": "success"
+    "status": "success",
+    "userId": "uuid-del-usuario",
+    "careerId": "career-uuid",
+    "career": "Estadística",
+    "institution": "UNMSM",
+    "affinity": {
+        "student_riasec_code": "RIA",
+        "career_riasec_profile": "RIA",
+        "affinity_score": 1.0,
+        "scores_by_criterion": {
+            "afinidad": 0.85,
+            "ingreso": 0.82,
+            "costo": 0.90,
+            "admision": 0.60,
+            "duracion": 0.75
+        },
+        "concordancia_score": 0.847
+    },
+    "verifiable_data": {
+        "monthly_income_imputed": 3200,
+        "annual_cost_imputed": 100,
+        "admission_rate_imputed": 18,
+        "duration_years_imputed": 5
+    }
 }
 ```
 
-**Response (no_documents):**
+**Response (404):**
 ```json
 {
-    "answer": "",
-    "sources": [],
-    "confidence": 0.0,
-    "status": "no_documents"
+    "status": "error",
+    "message": "Carrera no encontrada"
+}
+```
+
+---
+
+> **Sobre feedback (`POST /feedback`):** No existe como endpoint REST. El flujo de validación es:
+> 1. El AI Advisor (o frontend) emite un evento `FeedbackSubmitted` a EventBridge.
+> 2. Matching Context consume el evento mediante un handler asíncrono.
+> 3. El handler persiste el feedback en la tabla `feedback` de Aurora PostgreSQL.
+> 4. Ver `backend/lambda/feedback_handler.py` en tasks.md para más detalle.
+>
+> **Sobre `/rag` y `/universities`:** No se implementan en Matching Context. `/rag` es responsabilidad del AI Advisor (repo `08-deep-agent`). Las consultas de universidades/georreferencia se resuelven mediante Career Context (`/v1/careers/*`).
 }
 ```
 
@@ -3792,7 +3761,10 @@ careermatch-peru/
 - [ ] Implementar `backend/app.py` (FastAPI endpoints)
 - [ ] Implementar `backend/llm_service.py` (Bedrock Claude)
 - [ ] Implementar `backend/scoring.py` (determinístico)
-- [ ] Implementar `backend/feedback.py` (Aurora)
+- [ ] Implementar `backend/feedback.py` (Aurora persistence)
+- [ ] Implementar `backend/lambda/recommendations_handler.py` (GET /v1/match/recommendations)
+- [ ] Implementar `backend/lambda/affinity_handler.py` (GET /v1/match/{careerId}/affinity)
+- [ ] Implementar `backend/lambda/feedback_handler.py` (EventBridge handler)
 - [ ] Tests unitarios: `uv run pytest tests/test_*.py -v`
 
 ### Fase 5: Pipeline de Datos
@@ -3807,19 +3779,19 @@ careermatch-peru/
 ### Fase 6: Frontend
 
 - [ ] Implementar `frontend/app.js` (CareerMatchApp)
-- [ ] Testing manual: `/chat` → `/feedback` → `/rag`
+- [ ] Testing manual: el AI Advisor maneja el flujo conversacional. Matching Context expone `GET /v1/match/recommendations` y `GET /v1/match/{careerId}/affinity`.
 - [ ] Responsividad en móvil
 
 ### Fase 7: Despliegue AWS (PRODUCCIÓN — fuera de alcance demo)
 
-> ⚠ Para la demo, el despliegue es simplemente `docker-compose up -d`. Los pasos siguientes son para la arquitectura de producción (Lambda + Fargate + API Gateway).
+> ⚠ Para la demo, el despliegue es simplemente `docker-compose up -d`. Los pasos siguientes son para la arquitectura de producción real (Lambda + EventBridge + Aurora, NO Fargate — ver ADR-001).
 
 - [ ] Build Docker image: `docker build -t careermatch:latest .`
 - [ ] Push a ECR: `aws ecr get-login-password | docker login ...`
-- [ ] Crear Fargate service (ECS) con image ECR
-- [ ] Configurar ALB + VPC Link (Lambda → Fargate)
-- [ ] Crear Lambda functions para `/session/create`, `/feedback`, `/universities`
-- [ ] Configurar API Gateway (expone `/chat` vía Fargate, otros vía Lambda)
+- [ ] Desplegar Lambdas de Matching Context: `matching_handler` (EventBridge-triggered), `recommendations_handler` (API Gateway, `GET /v1/match/recommendations`), `affinity_handler` (API Gateway, `GET /v1/match/{careerId}/affinity`), `feedback_handler` (EventBridge-triggered)
+- [ ] Configurar API Gateway v2 (HTTP) con rutas para Matching Context
+- [ ] Configurar reglas de EventBridge `spark-match-events` para los handlers
+- [ ] NO crear Fargate, NO crear endpoint `/chat` en este stack
 
 ### Fase 8: Testing & Monitoring
 
