@@ -20,7 +20,7 @@
 - **Reproducibilidad**: Snapshots versionados permiten auditar exactamente qué datos y configuración se usó.
 - **Aislamiento de datos** por `session_id`.
 - **Degradación controlada**: Si componentes fallan, el sistema retorna la mejor respuesta posible con información disponible.
-- **Arquitectura modular AWS**: Para la demo, un solo servicio FastAPI sirve todos los endpoints (`/chat`, `/feedback`, `/universities`). La arquitectura Lambda + Fargate + API Gateway queda como **meta de producción** (ver ADR-001 en sección 2.2).
+- **Arquitectura serverless multi-contexto**: API Gateway v2 (HTTP) enruta a Lambdas por contexto de negocio. El chat conversacional es un servicio Python separado (repo `08-deep-agent`). Matching Context (scoring) + Data Pipeline son el alcance de este documento. Ver [`docs/SDD/tasks.md`] y ADR-001 (decisión real que descarta Fargate).
 
 ---
 
@@ -28,51 +28,37 @@
 
 ### 2.1 Diagrama de Alto Nivel
 
-> **Demo (alcance MVP):** Un solo servicio FastAPI sirve todos los endpoints.
-> **Producción (meta, ver ADR-001):** Lambda + Fargate + API Gateway como se describe abajo.
+La arquitectura real del sistema es **API Gateway v2 (HTTP) → Lambdas por contexto → EventBridge**, con el chat en un **servicio Python aparte** (no Fargate).
 
 ```
-─── Demo (un solo servicio FastAPI) ──────────────────────────────────
-Cliente (browser)
-    ↓ (HTTP) 
-localhost:8000
-    ├→ /chat        (FastAPI → Orchestrator → LLM/Scoring)
-    ├→ /feedback    (FastAPI → FeedbackStorage)
-    ├→ /universities (FastAPI → DynamoDB / stub local)
-    └→ /health      (FastAPI health check)
-
-FastAPI Service (single container):
-    Orchestrator 
-      ├→ LLM_Layer (Bedrock/Claude-3.5-Sonnet)
-      ├→ Session_Manager (in-memory, TTL=1800s)
-      ├→ Scoring_Engine (determinístico, en-process)
-      ├→ Feedback_Storage (PostgreSQL local)
-      └→ RAG_Module (opcional, con pgvector)
-
-Persistencia:
-    └→ PostgreSQL local (simula Aurora): feedback, rankings, pgvector
-
-─── Producción (meta post-demo, ver ADR-001) ─────────────────────────
-Cliente (browser)
-    ↓ (HTTP)
-API Gateway
-    ├→ Lambda: /session/create, /feedback, /universities       [stateless, CRUD]
-    └→ VPC Link → ALB → Fargate: /chat                         [stateful, agente]
-
-Fargate Service (Deep Agent):
-    Orchestrator 
-      ├→ LLM_Layer (Bedrock/Claude-3.5-Sonnet)
-      ├→ Session_Manager (in-memory, TTL=1800s)
-      ├→ Scoring_Engine (determinístico, en-process)
-      └→ RAG_Module (opcional)
-           └→ Embedding_Service (Bedrock Titan Embeddings)
-                └→ pgvector (Aurora PostgreSQL)
+API Gateway v2 (HTTP)
+│
+├→ /v1/auth/*          → Lambda (Identity Context, TypeScript/Node.js 20)
+│                         register, login, users/me, JWT emisión+validación
+│
+├→ /v1/assessment/*    → Lambda (Assessment Context, TypeScript/Node.js 20)
+│                         RIASEC tagging, interpretación de preferencias
+│
+├→ /v1/careers/*       → Lambda (Career Context, TypeScript/Node.js 20)
+│                         universidades, georreferencia, filtering
+│
+├→ /v1/matching/*      → Lambda (Matching Context, Python 3.12)
+│                         Scoring_Engine (determinístico, este repo)
+│
+├→ EventBridge (spark-match-events)
+│   ├→ Handler: feedback persistence (Aurora PostgreSQL)
+│   ├→ Handler: notification / analytics
+│   └→ Handler: pipeline triggers
+│
+└→ Servicio separado (repo 08-deep-agent):
+    FastAPI + LangGraph sobre AgentCore Runtime
+    └→ Chat conversacional, RAG, interpretación LLM — NO Fargate, NO parte de este repo
 
 Persistencia:
     ├→ Aurora PostgreSQL: feedback, rankings, pgvector (career_chunks)
     └→ DynamoDB: universities (georreferencia, GSI location-index)
 
-Pipeline de Datos (batch):
+Pipeline de Datos (batch, este repo):
     data/raw.xlsx / snapshot existente (fuente primaria — ver nota)
       → Data Clean
       → Feature Engineering (normalización MinMax)
@@ -83,42 +69,28 @@ Pipeline de Datos (batch):
 
     Nota: `ingestion.py` (Selenium, Ponte en Carrera) es opcional para la demo. Los snapshots existentes en `snapshots/raw/` contienen datos suficientes. Si se requiere actualización, `DataLoader.load()` restaura desde el snapshot más reciente automáticamente. El job de scraping Selenium puede ejecutarse como cron/EventBridge programado (semanal o mensual), no como paso bloqueante del pipeline.
 
-    Pipeline: EventBridge cron → AWS Batch/Fargate task (producción) | flujo local manual (demo):
+    Pipeline: EventBridge cron → AWS Batch (producción) | flujo local manual (demo):
 ```
 
-### 2.2 Arquitectura para la Demo (un solo FastAPI)
+### 2.2 Contextos del Sistema
 
-Para el MVP/demo, todo corre en un **solo servicio FastAPI** (contenedor Docker). Esto evita la complejidad operativa de Lambda + API Gateway + VPC Link, acelerando el desarrollo iterativo.
+El backend se organiza en contextos, cada uno con su propio stack:
 
-| Aspecto | Demo (alcance MVP) | Producción (meta, ADR-001) |
-|---|---|---|
-| Compute | 1 contenedor FastAPI (Fargate o local) | Lambda (stateless) + Fargate (stateful) |
-| Endpoints | `/chat`, `/feedback`, `/universities` todo en FastAPI | API Gateway → Lambda (/session, /feedback, /universities) + VPC Link → Fargate (/chat) |
-| Sesión | JWT emitido por Identity Context, validado en API Gateway + por Lambda | JWT sin estado compartido |
-| Persistencia | PostgreSQL local (o Aurora si disponible) | Aurora PostgreSQL + DynamoDB |
-| Frontend | Sirve desde FastAPI (static files) o CDN | API Gateway + CloudFront |
-| Despliegue | `docker-compose up` | AWS SAM / Terraform multi-stack |
+| Contexto | Lenguaje | Compute | Responsabilidad |
+|---|---|---|---|
+| **Identity** | TypeScript/Node.js 20 | Lambda | Auth (register/login/JWT), perfiles de usuario |
+| **Assessment** | TypeScript/Node.js 20 | Lambda | RIASEC tagging, interpretación de preferencias |
+| **Career** | TypeScript/Node.js 20 | Lambda | Catálogo de carreras, universidades, georreferencia |
+| **Matching** | Python 3.12 | Lambda | Scoring determinístico, ranking, feedback persistence |
+| **AI Advisor** | Python (FastAPI + LangGraph) | Servicio dedicado (repo `08-deep-agent`) | Chat conversacional, RAG, orquestación LLM |
 
-### 2.2.b Producción: Lambda + Fargate (meta post-demo)
+> **Nota sobre Matching Context (este repo):** Solo Matching (scoring determinístico con Python 3.12 Lambda) y Data Pipeline corresponden a este documento. Identity, Assessment, Career y AI Advisor se implementan en otros repositorios/stacks. El `Dockerfile` y `docker-compose.yml` existentes son válidos únicamente para desarrollo local del Matching Context y del data pipeline; ya no describen "el backend completo".
 
-Cuando se requiera escalar a producción, la arquitectura objetivo es:
+### 2.2.b Por qué no Fargate
 
-El loop conversacional requiere:
-- Múltiples llamadas a Bedrock por turno.
-- Mantener contexto en memoria entre turnos de la misma sesión.
-- Posible duración variable (4+ turnos).
+El diseño original planteaba Fargate para el chat porque "Lambda no es adecuado: timeout corto (15 min), stateless forzado, costo por llamada". La solución real no fue Fargate — fue **sacar el chat a un servicio dedicado aparte** (`08-deep-agent`, FastAPI + LangGraph sobre AgentCore Runtime), mientras todo lo demás (incluyendo scoring) corre en Lambda. Esto mantiene la simplicidad operativa de Lambda para los contextos stateless sin introducir la complejidad de Fargate/ECS.
 
-Lambda no es adecuado: timeout corto (15 min), stateless forzado, costo por llamada. **Fargate proporciona:**
-- Contenedor Python persistente.
-- Memoria en-process ilimitada (para sesiones).
-- Long polling / WebSocket support (para chat fluido).
-
-**Stateless (Lambda) mantiene:**
-- `/session/create` → JWT
-- `/feedback` → validaciones
-- `/universities` → lectura de GIS
-
-> **Decisión (ADR-001):** Para la demo se prioriza velocidad de desarrollo sobre separación de servicios. La migración a Lambda+Fargate se hará post-demo si la carga lo justifica. Ver `OBSERVACIONES_tasks.md` § Simplificaciones.
+> **Decisión (ADR-001):** Ver el ADR real de Angel que descarta Fargate. La referencia en versiones anteriores de este documento a un ADR-001 "demo vs. producción" es obsoleta.
 
 ---
 
@@ -151,7 +123,7 @@ Lambda no es adecuado: timeout corto (15 min), stateless forzado, costo por llam
 | | 7.2 Validación JSON 3 reintentos | `_parse_and_validate_json` |
 | | 7.3 Generación explicaciones | `generate_explanation` |
 | **R8 — Backend** | 8.1 Lambda `/session`, `/feedback`, `/universities` | 3 handlers |
-| | 8.2 Fargate `/chat` + SessionContext memoria | `Orchestrator.handle_turn` |
+| | 8.2 Lambda `/v1/matching/score` + EventBridge output | `Orchestrator.handle_turn` |
 | | 8.3 JWT sin estado compartido | JWT validado en API Gateway v2 (edge) + Powertools en cada Lambda |
 | **R9 — Persistencia** | 9.1 Aurora: feedback, rankings aislados | `FeedbackRecord` + índices |
 | | 9.2 pgvector Aurora: career_chunks | `career_chunks` tabla |
@@ -166,9 +138,9 @@ Lambda no es adecuado: timeout corto (15 min), stateless forzado, costo por llam
 ## Restricciones Transversales
 
 - **Package manager:** `uv` (no Poetry/Conda, no pip puro).
-- **Framework Fargate:** FastAPI + Uvicorn.
-- **Framework Lambda:** `boto3` puro (sin frameworks adicionales).
-- **Cobertura tests:** ≥ 60% en `scoring`, `llm_service`, `auth`, `data_pipeline`.
+- **Framework Lambda (Python):** `boto3` puro (sin frameworks adicionales como `zappa`).
+- **Framework servicio local (Matching Context):** FastAPI + Uvicorn (solo desarrollo local).
+- **Cobertura tests:** ≥ 60% en `scoring`, `data_pipeline`.
 - **Credenciales:** Variables de entorno / AWS Secrets Manager (nunca hardcodeadas).
 ---
 
@@ -1304,7 +1276,7 @@ class Orchestration:
 
 ---
 
-### `backend/app.py` — FastAPI Entrypoint (Fargate)
+### `backend/app.py` — FastAPI Entrypoint (desarrollo local Matching Context)
 
 ```python
 from fastapi import FastAPI, HTTPException, Depends, Request
@@ -2003,11 +1975,11 @@ class RankingItem:
 
 ---
 
-### `SessionContext` (en memoria, Fargate, TTL=1800s)
+### `SessionContext` (en memoria, desarrollo local, TTL=1800s)
 
 ```python
 class SessionContext:
-    """Contexto conversacional de sesión (en memoria en Fargate)."""
+    """Contexto conversacional de sesión (en memoria para desarrollo local)."""
     
     session_id: str  # UUID
     profile: StudentProfile  # Perfil parcial/completo interpretado
@@ -3338,7 +3310,7 @@ logger.info("Ranking generated", extra={
 
 ## Docker & Containerización
 
-### Dockerfile (Demo — un solo servicio FastAPI)
+### Dockerfile (desarrollo local — Matching Context)
 
 ```dockerfile
 FROM python:3.10-slim
@@ -3370,7 +3342,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
 CMD ["uv", "run", "uvicorn", "backend.app:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
-### docker-compose.yml (Demo — un solo servicio FastAPI)
+### docker-compose.yml (desarrollo local — Matching Context + PostgreSQL)
 
 ```yaml
 version: '3.9'
