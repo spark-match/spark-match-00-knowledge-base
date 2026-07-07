@@ -76,10 +76,11 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
       - `admission_rate_imputed` → clamp a `[0, 90]`.
       - Log warnings si se hace reajuste.
     - Método `normalize_features()`:
-      - `ingreso_norm = normalize_variable(monthly_income_imputed, log=True, invert=False)`.
-      - `costo_norm = normalize_variable(annual_cost_imputed, log=True, invert=False)`.
-      - `duracion_norm = normalize_variable(duration_imputed, log=False, invert=False)`.
-      - `selectividad_norm = normalize_variable(admission_rate_imputed, log=False, invert=True)` (mayor tasa → menor selectividad).
+      - `ingreso_norm = normalize_variable(monthly_income_imputed, log=True, invert=False)` (mayor ingreso = mejor).
+      - `costo_norm = normalize_variable(annual_cost_imputed, log=True, invert=True)` (invertir: mayor = más barato).
+      - `admission_norm = normalize_variable(admission_rate_imputed, log=False, invert=False)` (mayor tasa = más fácil acceso).
+      - `duracion_norm = normalize_variable(duration_imputed, log=False, invert=True)` (invertir: mayor = más corta).
+      - **Nota**: todas las normas quedan orientadas "mayor = mejor para el estudiante". El scoring NO debe volver a invertir.
     - Método `save_features(output_path)`: guarda CSV con encoding `utf-8-sig`.
     - Método `save_config()`: guarda `feature_config.json`.
     - Método `create_snapshot()`: genera snapshots versionados en `snapshots/features/` y `snapshots/configs/` con timestamp.
@@ -189,19 +190,20 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - Loguea warning si se hace ajuste.
     - Retorna dict con pesos válidos.
     _Requerimientos: 2.2, 2.3_
-  - [ ] 6.5 Implementar función `calculate_score(weights: dict, afinidad_norm: float, ingreso_norm: float, costo_norm: float, selectividad_norm: float, duracion_norm: float) -> float`:
-    - Aplica inversiones según criterio:
-      - `ingreso_score = ingreso_norm` (mayor ingreso → mejor).
-      - `costo_score = 1 - costo_norm` (menor costo → mejor).
-      - `admision_score = 1 - selectividad_norm` (más fácil → mejor).
-      - `duracion_score = 1 - duracion_norm` (más corta → mejor).
-    - Fórmula: `score = w_afinidad * afinidad_norm + w_ingreso * ingreso_score + w_costo * costo_score + w_admision * admision_score + w_duracion * duracion_score`.
+  - [ ] 6.5 Implementar función `calculate_score(weights: dict, afinidad_norm: float, ingreso_norm: float, costo_norm: float, admission_norm: float, duracion_norm: float) -> float`:
+    - Todas las normas ya están orientadas "mayor = mejor" por el pipeline de datos:
+      - `ingreso_norm` (mayor ingreso = mejor).
+      - `costo_norm` (mayor = más barato, ya invertido en pipeline).
+      - `admission_norm` (mayor = más fácil acceso).
+      - `duracion_norm` (mayor = más corta, ya invertido en pipeline).
+    - **NO aplicar inversiones adicionales**.
+    - Fórmula: `score = w_afinidad * afinidad_norm + w_ingreso * ingreso_norm + w_costo * costo_norm + w_admision * admission_norm + w_duracion * duracion_norm`.
     - Clamp a `[0, 1]`.
     - Retorna float.
     _Requerimientos: 5.1_
   - [ ] 6.6 Implementar clase `ScoringEngine`:
     - Constructor: carga `features.csv` en DataFrame, carga `feature_config.json`.
-    - Valida schema: debe tener columnas `career_id, career_name, institution, riasec_profile, ingreso_norm, costo_norm, selectividad_norm, duracion_norm, region, tipo_institucion, ingreso_promedio, costo_mensualidad, tasa_admision, duracion_anios`.
+    - Valida schema: debe tener columnas `career_id, career_name, institution, riasec_profile, ingreso_norm, costo_norm, admission_norm, duracion_norm, region, tipo_institucion, ingreso_promedio, costo_mensualidad, tasa_admision, duracion_anios`.
     - Si archivo no existe: raise `FileNotFoundError`.
     - Si schema incorrecto: raise `ValueError`.
   - [ ] 6.7 Implementar método `rank_and_filter(self, profile: StudentProfile, features_df: pd.DataFrame) -> list[RankingItem]`:

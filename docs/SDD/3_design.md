@@ -494,7 +494,7 @@ class ScoringEngine:
         - Carga features.csv en memoria (Pandas DataFrame)
         - Carga config.json (parámetros de normalización)
         - Valida esquema: career_id, career_name, institution, 
-          riasec_profile, ingreso_norm, costo_norm, selectividad_norm, 
+          riasec_profile, ingreso_norm, costo_norm, admission_norm, 
           duracion_norm, region, tipo_institucion, datos verificables
         
         Errores:
@@ -551,9 +551,9 @@ class ScoringEngine:
         weights: dict,  # {w_afinidad, w_ingreso, w_costo, w_admision, w_duracion}
         afinidad: float,  # [0,1]
         ingreso_norm: float,  # [0,1]
-        costo_norm: float,  # [0,1]
-        selectividad_norm: float,  # [0,1]
-        duracion_norm: float,  # [0,1]
+        costo_norm: float,  # [0,1] — mayor = más barato (ya invertido en pipeline)
+        admission_norm: float,  # [0,1] — mayor = más fácil acceso
+        duracion_norm: float,  # [0,1] — mayor = más corta (ya invertido en pipeline)
     ) -> float:
         """
         Calcula concordancia score de una carrera.
@@ -561,16 +561,17 @@ class ScoringEngine:
         Fórmula:
             score = w_afinidad * afinidad
                   + w_ingreso * ingreso_norm
-                  + w_costo * (1 - costo_norm)           [inversión]
-                  + w_admision * (1 - selectividad_norm)  [inversión]
-                  + w_duracion * (1 - duracion_norm)      [inversión]
+                  + w_costo * costo_norm
+                  + w_admision * admission_norm
+                  + w_duracion * duracion_norm
         
         Returns:
             float [0, 1]
         
         Notas:
-        - Todas las entradas están normalizadas [0,1]
-        - Inversiones: menor costo/selectividad/duración → mayor score
+        - Todas las normas ya están orientadas [0,1] con "mayor = mejor para el estudiante"
+        - El pipeline ya invierte costo y duración, y orienta admisión como facilidad
+        - Scoring NO aplica inversiones adicionales
         """
     
     def rank_and_filter(
@@ -1637,31 +1638,29 @@ class FeatureEngineer:
         return self.df
     
     def normalize_features(self) -> pd.DataFrame:
-        """Genera 4 variables normalizadas [0,1]."""
-        # income_score = MinMax(log1p(income))
-        self.df["income_score"] = (
-            np.log1p(self.df["monthly_income_imputed"])
-        )
-        self.df["income_score"] = (
-            (self.df["income_score"] - self.df["income_score"].min()) /
-            (self.df["income_score"].max() - self.df["income_score"].min())
+        """Genera 4 variables normalizadas [0,1] (mayor = mejor para el estudiante)."""
+        # ingreso_norm = MinMax(log1p(income))  — mayor ingreso = mejor (no invertir)
+        self.df["ingreso_norm"] = np.log1p(self.df["monthly_income_imputed"])
+        self.df["ingreso_norm"] = (
+            (self.df["ingreso_norm"] - self.df["ingreso_norm"].min()) /
+            (self.df["ingreso_norm"].max() - self.df["ingreso_norm"].min())
         )
         
-        # cost_score = 1 - MinMax(log1p(cost))
+        # costo_norm = 1 - MinMax(log1p(cost))  — mayor = más barato (invertir)
         cost_log = np.log1p(self.df["annual_cost_imputed"])
-        self.df["cost_score"] = (
+        self.df["costo_norm"] = (
             1 - ((cost_log - cost_log.min()) / (cost_log.max() - cost_log.min()))
         )
         
-        # duracion_score = 1 - MinMax(duration)
+        # duracion_norm = 1 - MinMax(duration)  — mayor = más corta (invertir)
         duration = self.df["duration_imputed"]
-        self.df["duracion_score"] = (
+        self.df["duracion_norm"] = (
             1 - ((duration - duration.min()) / (duration.max() - duration.min()))
         )
         
-        # admission_score = MinMax(admission)
+        # admission_norm = MinMax(admission)  — mayor = más fácil (no invertir)
         admission = self.df["admission_rate_imputed"]
-        self.df["admission_score"] = (
+        self.df["admission_norm"] = (
             (admission - admission.min()) / (admission.max() - admission.min())
         )
         
@@ -1760,11 +1759,11 @@ class CareerFeature:
     riasec_profile: str  # 3 letras, ej "RIA"
     riasec_source: str  # 'seed' | 'llm_tagged' | 'family_fallback' | 'pending'
     
-    # Features normalizadas [0,1] para scoring
-    ingreso_norm: float  # MinMax(log1p(ingreso_promedio))
-    costo_norm: float    # MinMax(log1p(costo_mensualidad))
-    selectividad_norm: float  # MinMax(tasa_admision) — mayor=más selectivo
-    duracion_norm: float  # MinMax(duracion_anios)
+    # Features normalizadas [0,1] para scoring (todas orientadas: mayor = mejor para el estudiante)
+    ingreso_norm: float    # MinMax(log1p(ingreso_promedio)) — mayor ingreso = mejor
+    costo_norm: float      # 1 - MinMax(log1p(costo_mensualidad)) — mayor = más barato (invertido)
+    admission_norm: float  # MinMax(tasa_admision) — mayor = más fácil acceso (no invertido)
+    duracion_norm: float   # 1 - MinMax(duracion_anios) — mayor = más corta (invertido)
     
     # Datos verificables (del MINEDU)
     ingreso_promedio: float  # S/. / mes (dato crudo)
@@ -2153,14 +2152,15 @@ FUNCTION normalize_variable(
 
 END FUNCTION
 
-// Aplicación específica para features.csv:
+// Aplicación específica para features.csv (todas orientadas: mayor = mejor para el estudiante):
 ingreso_norm = normalize_variable(ingreso_promedio, log=True, invert=False)
-costo_norm = normalize_variable(costo_mensualidad, log=True, invert=False)
-    // Inversión ocurre en fórmula final, no aquí
-selectividad_norm = normalize_variable(tasa_admision, log=False, invert=True)
-    // Mayor tasa admisión → menor selectividad → menor score deseado
-duracion_norm = normalize_variable(duracion_anios, log=False, invert=False)
-    // Inversión ocurre en fórmula final
+    // Mayor ingreso = mejor → no invertir
+costo_norm = normalize_variable(costo_mensualidad, log=True, invert=True)
+    // Menor costo = mejor → invertir (mayor costo_norm = más barato)
+admission_norm = normalize_variable(tasa_admision, log=False, invert=False)
+    // Mayor tasa = más fácil = mejor → no invertir
+duracion_norm = normalize_variable(duracion_anios, log=False, invert=True)
+    // Menor duración = mejor → invertir (mayor duracion_norm = más corta)
 ```
 
 ---
@@ -2174,9 +2174,9 @@ FUNCTION calculate_score(
     weights: dict,  // {w_afinidad, w_ingreso, w_costo, w_admision, w_duracion}
     afinidad_norm: float [0,1],
     ingreso_norm: float [0,1],
-    costo_norm: float [0,1],
-    selectividad_norm: float [0,1],
-    duracion_norm: float [0,1]
+    costo_norm: float [0,1],      // mayor = más barato (ya invertido en pipeline)
+    admission_norm: float [0,1],  // mayor = más fácil acceso
+    duracion_norm: float [0,1]    // mayor = más corta (ya invertido en pipeline)
 ) -> float
 
     // Validar que pesos sumen 1.0 ± 0.01
@@ -2187,19 +2187,14 @@ FUNCTION calculate_score(
             weights[key] /= sum_weights
         LOG_WARNING("Pesos renormalizados: suma no era 1.0")
     
-    // Aplicar inversiones de criterios
-    ingreso_score = ingreso_norm  // Mayor ingreso = mejor
-    costo_score = 1 - costo_norm  // Menor costo = mejor
-    admision_score = 1 - selectividad_norm  // Más fácil admisión = mejor
-    duracion_score = 1 - duracion_norm  // Menor duración = mejor
-    
-    // Fórmula: suma ponderada
+    // Todas las normas ya están orientadas "mayor = mejor" por el pipeline
+    // NO se aplican inversiones adicionales
     score = (
         weights["w_afinidad"] * afinidad_norm +
-        weights["w_ingreso"] * ingreso_score +
-        weights["w_costo"] * costo_score +
-        weights["w_admision"] * admision_score +
-        weights["w_duracion"] * duracion_score
+        weights["w_ingreso"] * ingreso_norm +
+        weights["w_costo"] * costo_norm +
+        weights["w_admision"] * admission_norm +
+        weights["w_duracion"] * duracion_norm
     )
     
     RETURN clamp(score, 0.0, 1.0)
@@ -2250,7 +2245,7 @@ FUNCTION rank_and_filter(
             afinidad = 0.5
             LOG_WARNING(f"RIASEC faltante para {row['career_id']}")
         
-        // Calcular score final
+        // Calcular score final (todas las normas ya están orientadas "mayor = mejor")
         score = calculate_score(
             weights={
                 "w_afinidad": profile.w_afinidad,
@@ -2262,7 +2257,7 @@ FUNCTION rank_and_filter(
             afinidad_norm=afinidad,
             ingreso_norm=row["ingreso_norm"],
             costo_norm=row["costo_norm"],
-            selectividad_norm=row["selectividad_norm"],
+            admission_norm=row["admission_norm"],
             duracion_norm=row["duracion_norm"]
         )
         
@@ -2275,8 +2270,8 @@ FUNCTION rank_and_filter(
                 "afinidad": afinidad,
                 "ingreso": row["ingreso_norm"],
                 "costo": row["costo_norm"],
-                "admision": 1 - row["selectividad_norm"],
-                "duracion": 1 - row["duracion_norm"]
+                "admision": row["admission_norm"],
+                "duracion": row["duracion_norm"]
             },
             "verifiable_data": {
                 "ingreso_promedio": row["ingreso_promedio"],
