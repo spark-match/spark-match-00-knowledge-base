@@ -2,7 +2,7 @@
 
 ## Descripción General
 
-La implementación avanza en cinco fases estrictamente incrementales sobre AWS, cada una dejando el sistema en un estado funcional, integrado y validado: primero se construye el pipeline de datos (`ingestion`, `data_clean`, `feature_engineering`) y el `ScoringEngine` determinístico como fundación aislada sin dependencias externas; luego se implementa el flujo conversacional completo (Bloques A/B/C, interpretación LLM vía Bedrock, sesión en memoria Fargate) como servicio funcional de punta a punta con fixtures locales; después se integra el backend híbrido real (Lambda stateless para `/session/create` y `/feedback`, Aurora PostgreSQL para persistencia, DynamoDB para georreferencia, sesión por `session_id` anónimo); luego se añaden capacidades secundarias opcionales (RAG con pgvector, embeddings Bedrock Titan, visualización de mapa); y finalmente se cierra con etiquetado RIASEC a escala completa (554 carreras únicas vía Bedrock batch + join a las 6,208 filas), tests de integración con fixtures reales, validación de propiedades de corrección y documentación final. Cada fase termina con un checkpoint explícito que verifica progreso integrado e inspecciona antes de continuar.
+La implementación avanza en cinco fases estrictamente incrementales sobre AWS, cada una dejando el sistema en un estado funcional, integrado y validado: primero se construye el pipeline de datos (`ingestion`, `data_clean`, `feature_engineering`) y el `ScoringEngine` determinístico como fundación aislada sin dependencias externas; luego se implementa el flujo conversacional completo (Bloques A/B/C, interpretación LLM vía Bedrock, sesión en memoria) como servicio funcional de punta a punta con fixtures locales en un solo FastAPI; después se agregan persistencia (Aurora PostgreSQL), georreferencia (DynamoDB) y sesión por `session_id` anónimo — todo desde el mismo servicio FastAPI para la demo (la arquitectura Lambda + Fargate + API Gateway queda como meta de producción, ver ADR-001); luego se añaden capacidades secundarias opcionales (RAG con pgvector, embeddings Bedrock Titan, visualización de mapa); y finalmente se cierra con etiquetado RIASEC a escala completa (554 carreras únicas vía Bedrock batch + join a las 6,208 filas), tests de integración con fixtures reales, validación de propiedades de corrección y documentación final. Cada fase termina con un checkpoint explícito que verifica progreso integrado e inspecciona antes de continuar.
 
 ## Tareas
 
@@ -472,7 +472,9 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
 
 ---
 
-## Fase 3 — Backend Híbrido y Persistencia (Alta): Lambda, Aurora, DynamoDB, Sesión Anónima
+## Fase 3 — Persistencia y Backend Completo (Alta): Aurora, DynamoDB, Sesión Anónima (un solo FastAPI para la demo)
+
+> ⚠ **Arquitectura para la demo:** Todos los endpoints (`/chat`, `/feedback`, `/universities`) se sirven desde un mismo FastAPI. Las tareas de infraestructura Lambda/API Gateway/VPC Link (13.3, partes de 17, 19.2) están marcadas como **`(Pospuesto — producción)`** y quedan fuera del alcance de la demo. La migración a Lambda+Fargate+API Gateway se hará post-demo si la carga lo justifica (ver ADR-001 en design.md § 2.2).
 
 - [ ] 13. Configurar Infraestructura AWS Base
   - [ ] 13.1 Crear tabla Aurora PostgreSQL vía AWS Console o AWS CLI:
@@ -491,7 +493,8 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - PK: `institution_id` (String).
     - Atributos: `name`, `location` (antes region), `management_type` (Pública/Privada, antes tipo_institucion), `latitude`, `longitude`, `careers_ids` (StringSet).
     - GSI: `location-index` (PK: `location`, SK: `institution_id`).
-  - [ ] 13.3 Crear repositorio ECR: `careermatch-repo` en región `us-east-1`.
+  - [ ] (Pospuesto — producción) 13.3 Crear repositorio ECR: `careermatch-repo` en región `us-east-1`.
+    - NOTA: ECR es necesario solo para el despliegue Lambda+Fargate de producción. Para la demo con un solo FastAPI, la imagen se construye localmente vía `docker-compose`.
 
 - [ ] 14. Implementar `infra/db_schema.sql` — Esquema Aurora PostgreSQL
   - [ ] 14.1 Crear tabla `career_chunks` (para RAG, pgvector):
@@ -593,22 +596,24 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - Verifica expiración por TTL: token expirado retorna None.
     - Verifica token inválido (uuid inexistente) retorna None.
 
-- [ ] 17. Implementar `backend/lambda/feedback_handler.py` — Lambda Feedback Handler
+- [ ] (Pospuesto — producción) 17. Implementar `backend/lambda/feedback_handler.py` — Lambda Feedback Handler
+  - NOTA: Para la demo, `/feedback` se sirve desde el mismo FastAPI (app.py). Este handler Lambda es necesario solo si se separa en API Gateway + Lambda para producción.
   - [ ] (Opcional) 17.1 Implementar `session_handler.lambda_handler(event, context)`:
     - Handler para API Gateway `POST /session/create`.
     - Invoca `auth_service.create_session()`.
     - Retorna `{statusCode: 200, body: json.dumps({session_id, session_token})}`.
     - NOTA: Solo necesario si se separa en Lambda la creación de sesión. Para MVP con sesión anónima, la creación se hace inline en `app.py` startup (ver tarea 11.5).
     _Requerimientos: 8.1_
-  - [ ] 17.2 Implementar `feedback_handler.lambda_handler(event, context)`:
+  - [ ] (Pospuesto — producción) 17.2 Implementar `feedback_handler.lambda_handler(event, context)`:
     - Evento API Gateway: `{httpMethod: "POST", path: "/feedback", body: json_string}`.
     - Parsea body: `{ranking_id, validation_score, selected_career, notes}`.
     - Valida `validation_score ∈ [1, 5]`: si no, retorna `{statusCode: 422, body: "..."}`.
     - Extrae `session_id` desde JWT en header (valida vía `auth_service.validate_token`).
     - Invoca `feedback_storage.save_feedback(...)`.
     - Retorna `{statusCode: 200, body: json.dumps({status: "success"})}`.
+    - NOTA: Para la demo, la validación y persistencia de feedback se hace directamente en `app.py` endpoint `/feedback`, sin Lambda.
     _Requerimientos: 8.1, 9.1_
-  - [ ] 17.3 Tests: `test_lambda_handlers.py`:
+  - [ ] (Pospuesto — producción) 17.3 Tests: `test_lambda_handlers.py`:
     - Mockea eventos API Gateway.
     - Verifica `/session/create` retorna token válido.
     - Verifica `/feedback` rechaza score fuera de rango (422).
@@ -641,13 +646,15 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - PK: `institution_id` (S).
     - Atributos: `name` (S), `location` (S, antes region), `management_type` (S, Pública/Privada, antes tipo_institucion), `latitude` (N), `longitude` (N), `careers_ids` (SS).
     - GSI: `location-index` con PK=`location`, SK=`institution_id`.
+    - NOTA: Para la demo, se puede usar DynamoDB local (moto) o un stub JSON. La tabla AWS se crea solo para producción.
     _Requerimientos: 9.3_
-  - [ ] 19.2 Implementar `backend/lambda/universities_handler.py`:
+  - [ ] (Pospuesto — producción) 19.2 Implementar `backend/lambda/universities_handler.py`:
     - Endpoint `GET /universities?location=Lima` (querystring optional).
     - Inicializa cliente DynamoDB: `dynamodb = boto3.resource('dynamodb', region_name=AWS_REGION)`.
     - Si `location` en params: consulta GSI `location-index` → `table.query(IndexName='location-index', KeyConditionExpression='location = :location', ExpressionAttributeValues={':location': location})`.
     - Si no: `table.scan()` (retorna todas).
     - Retorna `{statusCode: 200, body: json.dumps(items)}`.
+    - NOTA: Para la demo, el endpoint `/universities` se sirve desde el mismo FastAPI (app.py) con DynamoDB mockeado o stub.
     _Requerimientos: 9.3_
 - [ ] 19.3 Tests: `test_universities_handler.py`:
     - Mockea DynamoDB con `moto`.
@@ -668,7 +675,8 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - Session A: feedback sobre carrera X.
     - Session B: consultar feedback → no ve datos de Session A.
   - [ ] 20.3 Ejecutar suite: `uv run pytest tests/ --cov`.
-    - Cobertura ≥ 60% en `backend/persistence/`, `backend/lambda/`, `backend/auth.py`.
+    - Cobertura ≥ 60% en `backend/persistence/`, `backend/auth.py`.
+    - NOTA: `backend/lambda/` queda fuera de cobertura para la demo (postpuesto a producción).
     - Propiedades de corrección (3 — Aislamiento, 4 — Reproducibilidad) deben pasar.
 
 ---
@@ -843,7 +851,9 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
 - [ ] 28. Documentación Final y README
   - [ ] 28.1 Actualizar `README.md`:
     - Descripción clara del proyecto.
-    - Arquitectura híbrida AWS:
+    - Arquitectura (demo vs producción):
+      - **Demo**: Un solo FastAPI sirve `/chat`, `/feedback`, `/universities`. Sesión anónima en memoria. PostgreSQL local.
+      - **Producción (meta)**: Lambda + Fargate + API Gateway. Aurora PostgreSQL, DynamoDB, Bedrock.
       - Lambda: `/session/create`, `/feedback`, `/universities` (stateless).
       - Fargate: `/chat` (stateful, sesiones en memoria).
       - Aurora PostgreSQL: persistencia (feedback, rankings, pgvector).
@@ -931,8 +941,8 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
 
 - **Restricciones transversales** (heredadas de `design.md` § Restricciones Transversales):
   - Package manager: `uv` (NO Poetry, NO Conda, NO pip puro).
-  - Framework Fargate: `FastAPI` + `Uvicorn` (NO Flask, NO Django).
-  - Framework Lambda: `boto3` puro (NO frameworks adicionales como `zappa`).
+  - Framework servicio principal (demo): `FastAPI` + `Uvicorn` (todos los endpoints en un solo servicio) (NO Flask, NO Django).
+  - Framework Lambda (producción): `boto3` puro (NO frameworks adicionales como `zappa`).
   - Credenciales: ÚNICAMENTE vía variables de entorno o AWS Secrets Manager (NUNCA hardcoded, NUNCA en código).
   - LLM: ÚNICAMENTE Bedrock/Claude (NO Gemini, NO OpenAI en este ciclo).
   - Embeddings: ÚNICAMENTE Bedrock Titan (NO sentence-transformers local, NO OpenAI).
@@ -941,6 +951,8 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
 - **Sesión conversacional**: Vive **en memoria dentro del proceso Fargate** con TTL simple (1800s), decisión explícita para demo. NO introduce Redis ni DynamoDB para sesiones.
 
 - **Autenticación simplificada (2.2)**: Para el MVP se usa `session_id` anónimo (UUID v4) como token, sin JWT ni Lambda para creación de sesión. JWT queda como alternativa opcional (tarea 16.O) para cuando se necesite autenticación stateless entre Lambda y Fargate. La autenticación JWT y el handler Lambda `/session/create` quedan como tareas opcionales (16.O, 17.1, 18.O) para cuando se requiera identidad de usuario. Google OAuth es una extensión futura posible. El backend existente de Angel (con Identity completo) deberá reconciliarse antes de adoptar JWT en producción — ver `OBSERVACIONES_tasks.md` § Alineación de stack.
+
+- **Un solo servicio para la demo (2.3)**: Todos los endpoints (`/chat`, `/feedback`, `/universities`) se sirven desde el mismo FastAPI. La arquitectura Lambda + Fargate + API Gateway (diagrama en design.md § 2.1) es la **meta de producción** (ver ADR-001). Las tareas de infraestructura Lambda (13.3, 17, 19.2) y handlers Lambda están marcadas como `(Pospuesto — producción)` y quedan fuera del alcance de la demo. La migración se evalúa post-demo si la carga lo justifica.
 
 - **Etiquetado RIASEC** (6,208 carreras): Corre como **job batch** (AWS Batch o Fargate task, NO Lambda) por duración de llamadas Bedrock (potencialmente horas). Pipeline automatizado genera snapshot versionado. Validación muestral (300 carreras) es paso humano externo, pero export CSV es responsabilidad pipeline (tarea 25.2).
 

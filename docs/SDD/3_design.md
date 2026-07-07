@@ -23,7 +23,7 @@
 - **Reproducibilidad**: Snapshots versionados permiten auditar exactamente qué datos y configuración se usó.
 - **Aislamiento de datos** por `session_id`.
 - **Degradación controlada**: Si componentes fallan, el sistema retorna la mejor respuesta posible con información disponible.
-- **Arquitectura modular AWS**: Lambda (stateless) + Fargate (stateful agente) + Aurora PostgreSQL + DynamoDB.
+- **Arquitectura modular AWS**: Para la demo, un solo servicio FastAPI sirve todos los endpoints (`/chat`, `/feedback`, `/universities`). La arquitectura Lambda + Fargate + API Gateway queda como **meta de producción** (ver ADR-001 en sección 2.2).
 
 ---
 
@@ -31,7 +31,32 @@
 
 ### 2.1 Diagrama de Alto Nivel
 
+> **Demo (alcance MVP):** Un solo servicio FastAPI sirve todos los endpoints.
+> **Producción (meta, ver ADR-001):** Lambda + Fargate + API Gateway como se describe abajo.
+
 ```
+─── Demo (un solo servicio FastAPI) ──────────────────────────────────
+Cliente (browser)
+    ↓ (HTTP) 
+localhost:8000
+    ├→ /chat        (FastAPI → Orchestrator → LLM/Scoring)
+    ├→ /feedback    (FastAPI → FeedbackStorage)
+    ├→ /universities (FastAPI → DynamoDB / stub local)
+    └→ /health      (FastAPI health check)
+
+FastAPI Service (single container):
+    Orchestrator 
+      ├→ LLM_Layer (Bedrock/Claude-3.5-Sonnet)
+      ├→ Session_Manager (in-memory, TTL=1800s)
+      ├→ Scoring_Engine (determinístico, en-process)
+      ├→ Auth_Service (session_id anónimo en-memoria)
+      ├→ Feedback_Storage (PostgreSQL local)
+      └→ RAG_Module (opcional, con pgvector)
+
+Persistencia:
+    └→ PostgreSQL local (simula Aurora): feedback, rankings, pgvector
+
+─── Producción (meta post-demo, ver ADR-001) ─────────────────────────
 Cliente (browser)
     ↓ (HTTP)
 API Gateway
@@ -61,7 +86,22 @@ Pipeline de Datos (batch, EventBridge cron → AWS Batch/Fargate task):
       → features.csv (snapshot versionado, ahora con columna `riasec_profile`)
 ```
 
-### 2.2 Por qué Fargate (no Lambda) para el agente
+### 2.2 Arquitectura para la Demo (un solo FastAPI)
+
+Para el MVP/demo, todo corre en un **solo servicio FastAPI** (contenedor Docker). Esto evita la complejidad operativa de Lambda + API Gateway + VPC Link, acelerando el desarrollo iterativo.
+
+| Aspecto | Demo (alcance MVP) | Producción (meta, ADR-001) |
+|---|---|---|
+| Compute | 1 contenedor FastAPI (Fargate o local) | Lambda (stateless) + Fargate (stateful) |
+| Endpoints | `/chat`, `/feedback`, `/universities` todo en FastAPI | API Gateway → Lambda (/session, /feedback, /universities) + VPC Link → Fargate (/chat) |
+| Sesión | `session_id` anónimo en memoria | JWT sin estado compartido |
+| Persistencia | PostgreSQL local (o Aurora si disponible) | Aurora PostgreSQL + DynamoDB |
+| Frontend | Sirve desde FastAPI (static files) o CDN | API Gateway + CloudFront |
+| Despliegue | `docker-compose up` | AWS SAM / Terraform multi-stack |
+
+### 2.2.b Producción: Lambda + Fargate (meta post-demo)
+
+Cuando se requiera escalar a producción, la arquitectura objetivo es:
 
 El loop conversacional requiere:
 - Múltiples llamadas a Bedrock por turno.
@@ -77,6 +117,8 @@ Lambda no es adecuado: timeout corto (15 min), stateless forzado, costo por llam
 - `/session/create` → JWT
 - `/feedback` → validaciones
 - `/universities` → lectura de GIS
+
+> **Decisión (ADR-001):** Para la demo se prioriza velocidad de desarrollo sobre separación de servicios. La migración a Lambda+Fargate se hará post-demo si la carga lo justifica. Ver `OBSERVACIONES_tasks.md` § Simplificaciones.
 
 ---
 
@@ -1371,8 +1413,8 @@ class CareerMatchApp {
     async init() {
         this.sessionToken = localStorage.getItem("session_token");
         if (!this.sessionToken) {
-            // Crear sesión en backend Lambda (no implementado en esta sección)
-            // Por ahora, usar stub
+            // Demo: crear sesión anónima local (sin Lambda)
+            // En producción, se usaría POST /session/create vía Lambda
             await this.createSessionStub();
         }
         this.attachEventListeners();
@@ -3194,7 +3236,7 @@ logger.info("Ranking generated", extra={
 
 ## Docker & Containerización
 
-### Dockerfile (Fargate Agent)
+### Dockerfile (Demo — un solo servicio FastAPI)
 
 ```dockerfile
 FROM python:3.10-slim
@@ -3226,13 +3268,13 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
 CMD ["uv", "run", "uvicorn", "backend.app:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
-### docker-compose.yml (Desarrollo Local)
+### docker-compose.yml (Demo — un solo servicio FastAPI)
 
 ```yaml
 version: '3.9'
 
 services:
-  # Backend Fargate (simulado)
+  # Backend único (demo): sirve /chat, /feedback, /universities
   backend:
     build:
       context: .
@@ -3274,13 +3316,15 @@ networks:
     driver: bridge
 ```
 
-**Ejecución local:**
+**Ejecución local (demo):**
 
 ```bash
 docker-compose up -d
 # Backend disponible en http://localhost:8000
 # PostgreSQL en localhost:5432
 ```
+
+> **Producción:** En lugar de docker-compose, se usarán servicios AWS administrados (Aurora, DynamoDB, ECS Fargate, Lambda). Ver `infra/` y `docs/DEPLOYMENT.md` para la configuración de producción.
 
 ---
 
@@ -3408,10 +3452,11 @@ careermatch-peru/
 │   ├── config.py                # Config centralizada (AWS vars)
 │   └── utils.py                 # Logging JSON, helpers AWS
 │
-├── backend_lambda/              # Handlers Lambda (opcional, si se separan)
+├── backend_lambda/              # Handlers Lambda (PRODUCCIÓN — fuera de alcance demo)
 │   ├── session_handler.py       # POST /session/create
 │   ├── feedback_handler.py      # POST /feedback
 │   └── universities_handler.py  # GET /universities
+│                                # ⚠ Demo: estos endpoints se sirven desde backend/app.py
 │
 ├── data_pipeline/
 │   ├── __init__.py
@@ -3483,7 +3528,7 @@ careermatch-peru/
 │   ├── setup_bedrock.py         # Verificar modelo Bedrock disponible
 │   └── test_coverage.sh         # Reporte cobertura
 │
-├── infra/                       # Infrastructure as Code (opcional)
+├── infra/                       # Infrastructure as Code (PRODUCCIÓN — fuera de alcance demo)
 │   ├── cloudformation/
 │   │   ├── aurora.yaml          # Aurora PostgreSQL stack
 │   │   ├── dynamodb.yaml        # DynamoDB table
@@ -3493,6 +3538,7 @@ careermatch-peru/
 │       ├── main.tf
 │       ├── variables.tf
 │       └── outputs.tf
+│                                # ⚠ Demo: se usa docker-compose + PostgreSQL local
 │
 └── .github/
     └── workflows/               # GitHub Actions (opcional)
@@ -3519,6 +3565,7 @@ careermatch-peru/
 - [ ] Crear S3 bucket para snapshots (opcional)
 - [ ] Crear CloudWatch log group para Fargate
 - [ ] Crear ECR repository para imagen Docker
+> ⚠ Nota: Para la demo local, estos recursos no son necesarios — se usa PostgreSQL local (docker-compose) en lugar de Aurora, y stubs para DynamoDB. Los recursos AWS son necesarios solo para despliegue de producción.
 
 ### Fase 3: Desarrollo Local
 
@@ -3550,7 +3597,9 @@ careermatch-peru/
 - [ ] Testing manual: `/chat` → `/feedback` → `/rag`
 - [ ] Responsividad en móvil
 
-### Fase 7: Despliegue AWS
+### Fase 7: Despliegue AWS (PRODUCCIÓN — fuera de alcance demo)
+
+> ⚠ Para la demo, el despliegue es simplemente `docker-compose up -d`. Los pasos siguientes son para la arquitectura de producción (Lambda + Fargate + API Gateway).
 
 - [ ] Build Docker image: `docker build -t careermatch:latest .`
 - [ ] Push a ECR: `aws ecr get-login-password | docker login ...`
