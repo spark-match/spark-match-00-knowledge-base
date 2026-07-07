@@ -2,7 +2,7 @@
 
 ## Descripción General
 
-La implementación avanza en cinco fases estrictamente incrementales sobre AWS, cada una dejando el sistema en un estado funcional, integrado y validado: primero se construye el pipeline de datos (`ingestion`, `data_clean`, `feature_engineering`) y el `ScoringEngine` determinístico como fundación aislada sin dependencias externas; luego se implementa el flujo conversacional completo (Bloques A/B/C, interpretación LLM vía Bedrock, sesión en memoria) como servicio funcional de punta a punta con fixtures locales en un solo FastAPI; después se agregan persistencia (Aurora PostgreSQL), georreferencia (DynamoDB) y sesión por `session_id` anónimo — todo desde el mismo servicio FastAPI para la demo (la arquitectura Lambda + Fargate + API Gateway queda como meta de producción, ver ADR-001); luego se añaden capacidades secundarias opcionales (RAG con pgvector, embeddings Bedrock Titan, visualización de mapa); y finalmente se cierra con etiquetado RIASEC a escala completa (554 carreras únicas vía Bedrock batch + join a las 6,208 filas), tests de integración con fixtures reales, validación de propiedades de corrección y documentación final. Cada fase termina con un checkpoint explícito que verifica progreso integrado e inspecciona antes de continuar.
+La implementación avanza en cinco fases estrictamente incrementales sobre AWS, cada una dejando el sistema en un estado funcional, integrado y validado: primero se construye el pipeline de datos (`data_loading` desde snapshot existente, `data_clean`, `feature_engineering`) y el `ScoringEngine` determinístico como fundación aislada sin dependencias externas; luego se implementa el flujo conversacional completo (Bloques A/B/C, interpretación LLM vía Bedrock, sesión en memoria) como servicio funcional de punta a punta con fixtures locales en un solo FastAPI; después se agregan persistencia (Aurora PostgreSQL), georreferencia (DynamoDB) y sesión por `session_id` anónimo — todo desde el mismo servicio FastAPI para la demo (la arquitectura Lambda + Fargate + API Gateway queda como meta de producción, ver ADR-001); luego se añaden capacidades secundarias opcionales (RAG con pgvector, embeddings Bedrock Titan, visualización de mapa); y finalmente se cierra con etiquetado RIASEC a escala completa (554 carreras únicas vía Bedrock batch + join a las 6,208 filas), tests de integración con fixtures reales, validación de propiedades de corrección y documentación final. Cada fase termina con un checkpoint explícito que verifica progreso integrado e inspecciona antes de continuar.
 
 ## Tareas
 
@@ -28,17 +28,21 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
 
 ## Fase 1 — Fundación: Pipeline de Datos y Motor de Scoring (Alta): Datos Reproducibles y Ranking Determinístico sin Dependencias Externas
 
-- [ ] 2. Implementar `data_pipeline/ingestion.py` — Descarga Automatizada
-  - [ ] 2.1 Implementar clase `DataIngestion` con método `download(self) -> str`:
-    - Inicializa cliente Selenium Chrome con opciones headless.
-    - Navega a MINEDU_URL (variable entorno, default `https://ponte.minedu.gob.pe`).
-    - Ejecuta búsqueda: espera elemento `btnBuscar` (máximo 30s) y hace clic.
-    - Espera 5s a que descarga se inicie.
-    - Ejecuta descarga: espera elemento `descargarDondeEstudioExcel` (máximo 30s) y hace clic.
-    - Espera a que descarga complete (máximo 60s total).
-    - Si descarga completa: copia archivo a `data/raw.xlsx`, crea snapshot en `snapshots/raw/raw_{timestamp}.xlsx`, retorna ruta a `data/raw.xlsx`.
-    - Si timeout o error: loguea `WARNING` y retorna ruta a última versión conocida en `snapshots/raw/` (fallback).
-    - Cierra navegador al finalizar.
+- [ ] 2. Implementar `data_pipeline/data_loading.py` — Carga desde Snapshot / raw.xlsx
+  - [ ] 2.1 Implementar clase `DataLoader` con método `load(self) -> str`:
+    - Verifica existencia de `data/raw.xlsx` como fuente primaria.
+    - Si no existe: busca el archivo más reciente en `snapshots/raw/` ordenado por timestamp.
+    - Si hay snapshot disponible: copia a `data/raw.xlsx` (restauración) y retorna ruta.
+    - Si no hay ningún snapshot: loguea `WARNING` e intenta ejecutar `ingestion.py` como fallback (si el script existe).
+    - Retorna ruta a `data/raw.xlsx` lista para ser consumida por `DataCleaner`.
+    - NOTA: El Selenium scraping es opcional para la demo; los snapshots existentes contienen datos suficientes.
+    _Requerimientos: 10.3_
+  - [ ] (Opcional) 2.O Implementar `data_pipeline/ingestion.py` — Job de Refresco Selenium
+    - NOTA: Esta tarea es **opcional y no bloqueante** para la demo. Los scripts Selenium + snapshots versionados ya existen y funcionan (confirma que la simplificación es de bajo riesgo).
+    - Implementar clase `DataIngestion` con método `download(self) -> str` que orquesta Selenium headless para descargar el Excel de Ponte en Carrera.
+    - Si descarga completa: copia a `data/raw.xlsx`, crea snapshot versionado en `snapshots/raw/raw_{timestamp}.xlsx`.
+    - Si timeout o error: loguea `WARNING` y retorna ruta a último snapshot conocido (fallback).
+    - Puede ejecutarse como job cron/EventBridge programado (semanal, mensual), no como paso bloqueante del pipeline.
     _Requerimientos: 10.3_
   - [ ] 2.2 Implementar clase `DataCleaner` con método `clean(self) -> pd.DataFrame`:
     - Constructor: lee archivo Excel con `pd.read_excel(raw_file, header=6)`.
@@ -247,7 +251,7 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
 
 - [ ] 7. Checkpoint Fase 1 — Validación de Fundación
   - [ ] 7.1 Ejecutar suite `uv run pytest data_pipeline/ tests/test_scoring.py --cov` con fixture reducido (50 carreras, 10 semilla RIASEC).
-    - Verificar que `DataIngestion.download()` retorna path válido (o fallback si portal no disponible).
+    - Verificar que `DataLoader.load()` retorna path válido desde snapshot existente (o fallback si no hay snapshots).
     - Verificar que `DataCleaner.clean()` retorna DataFrame válido sin filas incompletas.
     - Verificar que `FeatureEngineer.run_pipeline()` genera `features.csv` con columnas `income_norm`, `cost_norm`, `admission_norm`, `duration_norm` en `[0,1]`.
     - Verificar que `tag_careers_with_bedrock` opera sobre carreras únicas (mockeado) y el join subsiguiente propaga correctamente `riasec_profile` a features_df.
