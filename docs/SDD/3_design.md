@@ -5,15 +5,17 @@
 **CareerMatch Perú** es un sistema de recomendación de carreras universitarias que opera mediante coreografía de eventos entre contextos serverless. El flujo principal es:
 
 1. Usuario inicia sesión autenticada vía JWT (Identity Context, TypeScript/Lambda).
-2. Expresa preferencias en lenguaje natural a través del AI Advisor (servicio Python separado, repo `08-deep-agent`).
-3. El **Assessment Context** (TypeScript/Lambda) interpreta preferencias en 3 bloques mediante el AI Advisor (Bedrock/Claude):
-   - **Bloque A**: RIASEC (6 dimensiones Holland)
-   - **Bloque B**: Pesos dinámicos (5 criterios: afinidad, ingreso, costo, admisión, duración)
+2. Responde un **cuestionario estructurado** (`POST /v1/assessments`, `POST /v1/assessments/{id}/responses`) que captura:
+   - **Bloque A**: RIASEC (6 preguntas tipo Likert)
+   - **Bloque B**: Pesos dinámicos (orden de prioridad sobre 5 criterios)
    - **Bloque C**: Filtros duros (región, tipo institución, presupuesto, modalidad)
-4. Al completar la interpretación, Assessment Context emite un evento **AssessmentCompleted** a EventBridge.
+3. El **Assessment Context** (TypeScript/Lambda) procesa las respuestas directamente, construye `StudentProfile` y calcula nivel de confianza según completitud.
+4. Al completar el cuestionario, Assessment Context emite un evento **AssessmentCompleted** a EventBridge.
 5. **Matching Context** (Python 3.12 Lambda) consume el evento, ejecuta el **Scoring_Engine** para calcular concordancia multi-criterio, ordena por score descendente, retorna **Top-5** y emite **RecommendationGenerated**.
 6. **AI Advisor** consume **RecommendationGenerated**, redacta explicaciones personalizadas vía LLM (Bedrock/Claude) y las presenta al usuario.
 7. El usuario valida con escala Likert y el feedback se persiste mediante Lambda handler asíncrono en EventBridge.
+
+> ⚠️ **Decisión pendiente (producto):** La captura de Bloques A/B/C puede migrarse a un flujo conversacional opcional vía AI Advisor (chat + interpretación LLM). Mientras no se decida, las secciones de `design.md` que asumen interpretación conversacional (`LLMService.interpret_bloque_*`, `generate_follow_up`, lógica de repregunta) se consideran **no vigentes / a confirmar**. Ver `tasks.md` tareas congeladas §8.x y §10.1.
 
 **Énfasis en:**
 - **Determinismo**: Cualquier input idéntico genera ranking idéntico en 100% de ejecuciones.
@@ -55,8 +57,9 @@ API Gateway v2 (HTTP)
     └→ Chat conversacional, RAG, interpretación LLM — NO Fargate, NO parte de este repo
 
 Persistencia:
-    ├→ Aurora PostgreSQL: feedback, rankings, pgvector (career_chunks)
-    └→ DynamoDB: universities (georreferencia, GSI location-index)
+    ├→ Aurora PostgreSQL: feedback, rankings, career_offerings, pgvector (career_chunks)
+    │   └→ schema `career`: catálogo de carreras, universidades, georreferencia, métricas
+    └→ DynamoDB: solo Notifications (push, notificaciones push al usuario)
 
 Pipeline de Datos (batch, este repo):
     data/raw.xlsx / snapshot existente (fuente primaria — ver nota)
@@ -64,12 +67,15 @@ Pipeline de Datos (batch, este repo):
       → Feature Engineering (normalización MinMax)
       → Extraer carreras únicas (554 distinct `career`, NO las 6.208 filas)
       → RIASEC Tagging sobre unique careers (Bedrock few-shot)
-      → Join RIASEC tags contra features.csv por `career`
-      → features.csv (snapshot versionado, ahora con columna `riasec_profile`)
+      → Join RIASEC tags contra career_offerings por `career`
+      → **Escribir a `career.career_offerings` en Aurora PostgreSQL**
+        (INSERT/UPDATE batch, reemplazando snapshot completo)
+      → Snapshot versionado local: snapshots/features/features_{timestamp}.csv
+        (solo como respaldo, no como fuente primaria)
 
     Nota: `ingestion.py` (Selenium, Ponte en Carrera) es opcional para la demo. Los snapshots existentes en `snapshots/raw/` contienen datos suficientes. Si se requiere actualización, `DataLoader.load()` restaura desde el snapshot más reciente automáticamente. El job de scraping Selenium puede ejecutarse como cron/EventBridge programado (semanal o mensual), no como paso bloqueante del pipeline.
 
-    Pipeline: EventBridge cron → AWS Batch (producción) | flujo local manual (demo):
+    Pipeline: EventBridge cron → AWS Batch → escribe a Aurora `career.career_offerings` (producción) | flujo local manual → escribe a Postgres local (demo):
 ```
 
 ### 2.2 Contextos del Sistema
@@ -80,11 +86,16 @@ El backend se organiza en contextos, cada uno con su propio stack:
 |---|---|---|---|
 | **Identity** | TypeScript/Node.js 20 | Lambda | Auth (register/login/JWT), perfiles de usuario |
 | **Assessment** | TypeScript/Node.js 20 | Lambda | RIASEC tagging, interpretación de preferencias |
-| **Career** | TypeScript/Node.js 20 | Lambda | Catálogo de carreras, universidades, georreferencia |
+| **Career** | TypeScript/Node.js 20 | Lambda | Catálogo de carreras, `CareerOffering` (carrera×universidad con métricas), georreferencia, emisión de `CareerCreated`/`CareerUpdated` |
 | **Matching** | Python 3.12 | Lambda | Scoring determinístico, ranking, feedback persistence |
 | **AI Advisor** | Python (FastAPI + LangGraph) | Servicio dedicado (repo `08-deep-agent`) | Chat conversacional, RAG, orquestación LLM |
 
 > **Nota sobre Matching Context (este repo):** Solo Matching (scoring determinístico con Python 3.12 Lambda) y Data Pipeline corresponden a este documento. Identity, Assessment, Career y AI Advisor se implementan en otros repositorios/stacks. El `Dockerfile` y `docker-compose.yml` existentes son válidos únicamente para desarrollo local del Matching Context y del data pipeline; ya no describen "el backend completo".
+>
+> ⚠️ **Decisión de producto pendiente — Bloques A/B/C:** El Assessment Context actual es un **cuestionario estructurado** (`POST /v1/assessments`, `POST /v1/assessments/{id}/responses`), NO una interpretación conversacional vía LLM. Los requisitos R1–R4 (❄️) describen el *ideal conversacional* pero están **pendientes de decisión**:
+> - **Opción A (actual):** El cuestionario estructurado es la única fuente. Los métodos `LLMService.interpret_bloque_*`, `generate_follow_up` y la lógica de repregunta (máx. 4 turnos) **quedan obsoletos** y deben eliminarse de `design.md`.
+> - **Opción B:** AI Advisor conversacional coexiste como capa opcional, escribiendo en Assessment Context vía su API o vía evento. Se debe documentar el mapeo exacto campo a campo.
+> - Mientras no se decida, toda la sección de Bloques A/B/C y sus métodos LLM se consideran **no vigentes / a confirmar**.
 
 ### 2.2.b Por qué no Fargate
 
@@ -100,22 +111,22 @@ El diseño original planteaba Fargate para el chat porque "Lambda no es adecuado
 
 | Req | Criterio | Implementación |
 |---|---|---|
-| **R1 — RIASEC** | 1.1 Captura conversacional de 6 scores | Bloque A, LLM interpreta |
+| **R1 — RIASEC** ❄️ | 1.1 Captura de 6 scores | Cuestionario estructurado (Assessment Context) — **pendiente decisión de producto** (ver nota) |
 | | 1.2 Cálculo de `riasec_code` (3 letras) | `calculate_riasec_code` |
 | | 1.3 Captura opcional: interests, strengths | `StudentProfile.interests` |
-| **R2 — Pesos** | 2.1 Captura de 5 pesos via orden (B1) | `calculate_weights_from_ranking` |
+| **R2 — Pesos** ❄️ | 2.1 Captura de 5 pesos via orden (B1) | Cuestionario estructurado — **pendiente decisión** |
 | | 2.2 Peso explícito en 0 + re-normalización | `validate_weights` |
-| | 2.3 Defaults 0.2 si no se logra priorizar | Fallback en Orchestrator |
-| **R3 — Filtros** | 3.1 Filtros C descartan antes scoring | `rank_and_filter` fase 1 |
- | | 3.2 "Me da igual" desactiva filtro | `profile.location = None` |
-| **R4 — Confianza** | 4.1 Fórmula `calculate_confidence` | 11 campos, [0,1] |
-| | 4.2 Avance si confidence >= 0.70 | `should_transition_to_recommendation` |
-| | 4.3 Máximo 4 repreguntas | `turn_count >= 4` fuerza ranking |
+| | 2.3 Defaults 0.2 si no se logra priorizar | Fallback en `validate_weights` |
+| **R3 — Filtros** ❄️ | 3.1 Filtros C descartan antes scoring | `rank_and_filter` fase 1 |
+| | 3.2 "Me da igual" desactiva filtro | `profile.location = None` |
+| **R4 — Confianza** ❄️ | 4.1 Cálculo de confianza según completitud | Cuestionario estructurado — **pendiente decisión** |
+| | 4.2 Avance si confianza suficiente | Assessment Context decide (no Matching) |
+| | 4.3 Máximo N repreguntas | Assessment Context decide (no Matching) |
 | **R5 — Scoring** | 5.1 Fórmula 5 criterios | `calculate_score` |
 | | 5.2 Determinismo | Mismo input → mismo ranking 100% |
 | | 5.3 Desempate alfabético | `diff < 0.001` → `institution` ASC |
 | | 5.4 Top-5 con datos verificables | `get_top_n(ranked_list, 5)` |
-| **R6 — Datos** | 6.1 Schema `features.csv` | `CareerFeature` modelo |
+| **R6 — Datos** | 6.1 Schema `career.career_offerings` en Aurora | `CareerOffering` modelo (career × institution con métricas) |
 | | 6.2 Etiquetado Bedrock few-shot | `tag_careers_with_bedrock` |
 | | 6.3 Validación muestral 300 carreras | `validate_sample` → CSV |
 | | 6.4 Fallback familia | `apply_family_fallback` |
@@ -127,7 +138,7 @@ El diseño original planteaba Fargate para el chat porque "Lambda no es adecuado
 | | 8.3 JWT sin estado compartido | JWT validado en API Gateway v2 (edge) + Powertools en cada Lambda |
 | **R9 — Persistencia** | 9.1 Aurora: feedback, rankings aislados | `FeedbackRecord` + índices |
 | | 9.2 pgvector Aurora: career_chunks | `career_chunks` tabla |
-| | 9.3 DynamoDB: universities + GSI location-index | `universities` tabla |
+| | 9.3 Aurora: `career.career_offerings` (carrera×universidad) | `CareerOffering` + índices (location, institution) |
 | **R10 — No funcionales** | 10.1 Scoring 6k+ combos en ≤ 1s | Benchmark test |
 | | 10.2 Aislamiento por `userId` | Queries filtrando siempre por JWT sub |
 | | 10.3 Fallback templado si fallan componentes | Degradación controlada |
@@ -244,6 +255,8 @@ class EmbeddingService:
 ### `backend/llm_service.py` — LLM_Layer (Amazon Bedrock Claude-3.5-Sonnet)
 
 > **NOTA:** Este módulo vive en el AI Advisor (repo `08-deep-agent`, FastAPI + LangGraph), NO en el Matching Context. Se documenta aquí como referencia de diseño pero su implementación está fuera del alcance de este repositorio.
+>
+> ⚠️ **NO VIGENTE / A CONFIRMAR — Bloques A/B/C conversacionales:** Los métodos `interpret_bloque_a`, `interpret_bloque_b`, `interpret_bloque_c`, `generate_follow_up` y la lógica de repregunta asumen captura conversacional vía LLM, pero el Assessment Context actual es un **cuestionario estructurado**. Estos métodos están **congelados** hasta la decisión de producto descrita en §1 y §3. Mientras tanto, `generate_explanation` (8.7) sigue vigente para el AI Advisor.
 
 **Responsabilidad:** Interpretar preferencias en lenguaje natural mediante Claude, detectar información incompleta, generar preguntas y explicaciones.
 
@@ -270,7 +283,156 @@ class LLMService:
         - Carga system prompts v1 (mínimo 3 ejemplos few-shot por método)
         """
     
+    # ❄️ CONGELADO — pendiente decisión de producto (cuestionario estructurado vs. conversacional)
     def interpret_bloque_a(
+        self,
+        message: str,
+        conversation_history: list[dict],
+    ) -> dict:
+        """
+        Interpreta preferencias RIASEC desde entrada natural (Bloque A).
+        
+        Args:
+            message: Entrada del usuario en español
+            conversation_history: Historial para continuidad
+        
+        Returns:
+            {
+                "riasec_scores": {
+                    "R": int [1,10],  # Realista
+                    "I": int [1,10],  # Investigador
+                    "A": int [1,10],  # Artístico
+                    "S": int [1,10],  # Social
+                    "E": int [1,10],  # Empresarial
+                    "C": int [1,10]   # Convencional
+                },
+                "missing_letters": list[str],  # Letras sin estimar
+                "confidence": float [0,1]
+            }
+        
+        Comportamiento:
+        - Usa system prompt de few-shot con 3+ ejemplos de perfiles RIASEC
+        - Extrae scores parciales (puede no tener los 6)
+        - JSON validado; si inválido (3 reintentos), retorna estructura templada
+        
+        Timeout:
+        - Máximo 5 segundos
+        
+        Ejemplos en prompt:
+            "Si el usuario dice 'Me encantan los números y resolver problemas', 
+             entonces: R=8, I=9, A=3, S=4, E=6, C=7"
+        """
+    
+    # ❄️ CONGELADO — pendiente decisión de producto (cuestionario estructurado vs. conversacional)
+    def interpret_bloque_b(
+        self,
+        message: str,
+        conversation_history: list[dict],
+    ) -> dict:
+        """
+        Interpreta prioridades de criterios (Bloque B).
+
+        Args:
+            message: Entrada del usuario
+            conversation_history: Historial
+
+        Returns:
+            {
+                "priority_order": list[str] | None,  
+                    # Ejemplo: ["afinidad", "ingreso", "costo", "admision", "duracion"]
+                    # Orden de prioridad descendente (1er elemento = más importante)
+                    # None si el usuario aún no prioriza
+                "explicit_weights": dict | None,
+                    # Alternativa: {w_afinidad: 0.3, w_ingreso: 0.2, ...}
+                    # None si se usa order en lugar de pesos explícitos
+                "confidence": float [0,1]
+            }
+
+        Comportamiento:
+        - Detecta si usuario da orden explícita ("lo más importante es X, luego Y")
+        - O detecta pesos implícitos ("me interesa ingresos pero costo no"
+        - Retorna order si es claro; weights si es explícito; None si indeciso
+        - JSON validado; fallback templado si falla
+
+        Timeout:
+        - Máximo 5 segundos
+        """
+
+    # ❄️ CONGELADO — pendiente decisión de producto (cuestionario estructurado vs. conversacional)
+    def interpret_bloque_c(
+        self,
+        message: str,
+        conversation_history: list[dict],
+    ) -> dict:
+        """
+        Interpreta filtros duros (Bloque C).
+
+        Args:
+            message: Entrada del usuario
+            conversation_history: Historial
+
+        Returns:
+            {
+                "location": str | None,  
+                    # Región específica o None (= "me da igual")
+                "management_type": "publica" | "privada" | None,
+                "presupuesto_max": float | None,  # En soles
+                "modalidad": "presencial" | "virtual" | None,
+                "confidence": float [0,1]
+            }
+
+        Comportamiento:
+        - Detecta si usuario menciona "me da igual" para algún filtro → None
+        - Detecta ubicación: "Lima", "Arequipa", etc. → normaliza
+        - Detecta tipo gestión: "pública", "privada"
+        - Detecta presupuesto: números mencionados
+        - Detecta modalidad: "online", "virtual", "presencial"
+
+        Timeout:
+        - Máximo 5 segundos
+        """
+
+    # ❄️ CONGELADO — pendiente decisión de producto (cuestionario estructurado vs. conversacional)
+    def generate_follow_up(
+        self,
+        profile: StudentProfile,
+        missing_info: list[str],
+        conversation_history: list[dict],
+    ) -> str:
+        """
+        Genera pregunta abierta para completar información faltante.
+
+        Args:
+            profile: Perfil parcial actual
+            missing_info: Lista de campos que faltan (ej ["afinidad_E", "w_ingreso"])
+            conversation_history: Historial para evitar repeticiones
+
+        Returns:
+            Pregunta conversacional en español peruano
+
+        Restricciones (Requerimiento 4):
+        - DEBE ser pregunta abierta (no SÍ/NO)
+        - DEBE mencionar por qué es útil la información
+        - NO DEBE repetir lo ya mencionado en historial
+        - DEBE ser contextual al perfil parcial
+
+        Ejemplos correctos:
+            "Veo que te interesan las matemáticas. ¿Hay algún aspecto de 
+             una carrera que sea especialmente importante para ti? Por ejemplo, 
+             algunos priorizan los ingresos futuros, otros el costo, y otros 
+             la facilidad de admisión."
+
+        Ejemplos incorrectos:
+            "¿Cuál es tu región?" (directa, no abierta)
+            "Dijiste que te gustan mates, ¿y qué más?" (repite lo ya dicho)
+
+        Timeout:
+        - Máximo 3 segundos
+
+        Comportamiento:
+        - Usa few-shot de preguntas naturales
+        - Si no hay missing_info claro, retorna string vacío
+        """
         self,
         message: str,
         conversation_history: list[dict],
@@ -501,28 +663,36 @@ class LLMService:
 class ScoringEngine:
     def __init__(
         self,
-        features_csv_path: str,
+        db_connection_string: str,
         config_json_path: str,
     ):
         """
         Inicializa motor de scoring.
         
         Args:
-            features_csv_path: Ruta a data/features.csv
-            config_json_path: Ruta a data/feature_config.json
+            db_connection_string: URI de Aurora PostgreSQL
+                (ej psycopg://user:pass@host/careermatch)
+            config_json_path: Ruta a data/feature_config.json (parámetros de normalización)
         
         Comportamiento:
-        - Carga features.csv en memoria (Pandas DataFrame)
-        - Carga config.json (parámetros de normalización)
-        - Valida esquema (columnas de features.csv): id, career, institution, 
-          riasec_profile (agregado vía join desde tabla RIASEC de 554 carreras únicas),
-          income_norm, cost_norm, admission_norm, 
-          duration_norm, location, management_type, y las 4 imputadas:
-          monthly_income_imputed, annual_cost_imputed, admission_rate_imputed, duration_years_imputed
+        - Conecta a Aurora PostgreSQL vía psycopg2
+        - Consulta schema `career`, tabla `career_offerings`:
+          SELECT id, career, institution, riasec_profile, location, 
+                 management_type, income_norm, cost_norm, admission_norm, 
+                 duration_norm, monthly_income_imputed, annual_cost_imputed, 
+                 admission_rate_imputed, duration_years_imputed
+          FROM career.career_offerings
+        - Carga resultado en Pandas DataFrame (en memoria)
+        - Valida esquema de columnas esperadas
+        - Si la tabla está vacía o no existe: raise ValueError
+        
+        Fallback (desarrollo local):
+        - Si AURORA_ENDPOINT no está configurado, intenta cargar desde
+          features.csv local (para desarrollo sin Aurora)
         
         Errores:
-        - FileNotFoundError: si archivos no existen
-        - ValueError: si esquema incorrecto
+        - ConnectionError: si Aurora no está disponible
+        - ValueError: si esquema incorrecto o tabla vacía
         """
     
     def calculate_riasec_code(self, riasec_scores: dict[str, int]) -> str:
@@ -596,7 +766,7 @@ class ScoringEngine:
         - El pipeline ya invierte costo y duración, y orienta admisión como facilidad.
         - Scoring NO aplica inversiones adicionales. No usar `1 - x` en ningún criterio.
         
-        Variables reales del CSV (features.csv):
+        Variables reales del aggregate `career.career_offerings` (Aurora):
         | Parámetro | Columna real | Fórmula | Significado |
         |-----------|-------------|---------|-------------|
         | `afinidad` | calculada | `calculate_affinity(riasec_code, riasec_profile)` | Match vocacional |
@@ -687,15 +857,15 @@ class ScoringEngine:
     
     def reload_features(self) -> None:
         """
-        Recarga features.csv desde disco sin reiniciar servidor.
+        Recarga career_offerings desde Aurora sin reiniciar servidor.
         
         Comportamiento:
-        - Lee features.csv nuevamente
+        - Re-ejecuta SELECT FROM career.career_offerings
         - Valida schema
         - Reemplaza dataset en memoria
         
         Errores:
-        - FileNotFoundError, ValueError: propagados a caller
+        - ConnectionError, ValueError: propagados a caller
         """
 ```
 
@@ -1082,8 +1252,8 @@ Emitido por Matching Context después de procesar `AssessmentCompleted`.
 ```
 [Assessment Context]                   [Matching Context]                 [AI Advisor]
        │                                      │                               │
-       │— Interpreta preferencias              │                               │
-       │  (vía AI Advisor API)                 │                               │
+       │— Procesa cuestionario estructurado   │                               │
+       │  (POST /v1/assessments/{id}/responses)│                             │
        │                                      │                               │
        │──emite AssessmentCompleted─────────> │                               │
        │                                      │                               │
@@ -1096,7 +1266,9 @@ Emitido por Matching Context después de procesar `AssessmentCompleted`.
        │                                      │                               │— Consume evento
        │                                      │                               │— Redacta explicaciones vía LLM
        │                                      │                               │— Presenta al usuario
-```
+       ```
+
+> ⚠️ **Nota:** El paso "Interpreta preferencias (vía AI Advisor API)" se eliminó porque el Assessment Context actual procesa un cuestionario estructurado, no lenguaje natural. Si se adopta la Opción B (AI Advisor conversacional coexiste), este paso se restablece con un mapeo explícito campo→campo entre la salida del chat y el `AssessmentCompleted`.
 
 ### `backend/lambda/matching_handler.py` — ScoringEngine como Lambda Reactivo
 
@@ -1110,7 +1282,7 @@ def lambda_handler(event: dict, context: object) -> dict:
     
     Flujo:
     1. Parsear detail del evento → perfil (riasec_scores, weights, filters, userId)
-    2. Cargar features.csv desde snapshot (S3)
+     2. Cargar career_offerings desde Aurora (o features.csv local fallback)
     3. Calcular código RIASEC: calculate_riasec_code(riasec_scores)
     4. Aplicar filtros duros (location, management_type, presupuesto_max, modalidad)
     5. Para cada fila: calcular afinidad + score
@@ -1126,7 +1298,7 @@ def lambda_handler(event: dict, context: object) -> dict:
     10. Retornar {statusCode: 200}
     
     Manejo de errores:
-    - Si features.csv no disponible: loguea error, no emite evento
+    - Si Aurora no disponible: loguea error, intenta features.csv local como fallback; si tampoco: no emite evento
     - Si Aurora caído: queue local + reintento
     - Si parse inválido: loguea, retorna error estructurado
     """
@@ -1220,7 +1392,10 @@ async def health():
 async def startup():
     """Inicializa ScoringEngine al levantar."""
     global scoring_engine
-    scoring_engine = ScoringEngine("data/features.csv", "data/feature_config.json")
+    scoring_engine = ScoringEngine(
+        db_connection_string=os.getenv("AURORA_ENDPOINT", "psycopg://localhost:5432/careermatch"),
+        config_json_path="data/feature_config.json"
+    )
     logger.info("Matching Context local iniciado correctamente")
 ```
 
@@ -1722,6 +1897,84 @@ class FeatureEngineer:
 
 ### Modelos de Datos
 
+### `CareerOffering` (aggregate carrera × universidad, Aurora schema `career`)
+
+**Definición:** Aggregate que modela la combinación carrera + universidad con todas las métricas necesarias para scoring y filtrado. Vive en Aurora PostgreSQL (schema `career`, tabla `career_offerings`), no en un CSV aislado.
+
+**Propietario:** Career Context (TypeScript/Node.js 20). El Career Context es responsable de mantener `career_offerings` actualizado. Matching Context consume estos datos vía:
+
+- **Opción A (recomendada para Matching):** Matching Context tiene acceso de **lectura directa** al schema `career` en Aurora y consulta `SELECT * FROM career.career_offerings` al inicio de cada invocación Lambda (o cachea en memoria por TTL corto).
+- **Opción B (event-driven):** Career Context emite eventos `CareerCreated`/`CareerUpdated`/`CareerDeleted` a EventBridge. Matching Context mantiene una tabla espejo (`matching.career_offerings`) sincronizada por estos eventos.
+
+**Decisión:** Se adopta **Opción A** para simplicidad (lectura directa al schema `career`), con **Opción B** como extensión futura si la latencia de lectura directa es problemática (>1s para 6,208 filas).
+
+```sql
+-- Schema career (propiedad de Career Context)
+CREATE SCHEMA IF NOT EXISTS career;
+
+-- Tabla: career_offerings (carrera × universidad con métricas)
+CREATE TABLE career.career_offerings (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    career_id       TEXT NOT NULL,          -- "estadistica_001"
+    career          TEXT NOT NULL,          -- "Estadística"
+    institution     TEXT NOT NULL,          -- "UNMSM"
+    career_family   TEXT,                   -- "Ciencias e Ingeniería"
+    
+    -- RIASEC etiquetado (agregado vía pipeline batch, join por career)
+    riasec_profile  VARCHAR(3),             -- "RIA", nullable (pendiente de etiquetar)
+    riasec_source   VARCHAR(20),            -- 'seed' | 'llm_tagged' | 'family_fallback'
+    
+    -- Datos crudos del MINEDU
+    monthly_income      DECIMAL(10,2),      -- S/. / mes
+    annual_cost         DECIMAL(10,2),      -- S/. / año
+    admission_rate      DECIMAL(5,2),       -- % (0–100)
+    duration_years      DECIMAL(3,1),       -- Años
+    
+    -- Datos imputados (según imputación jerárquica)
+    monthly_income_imputed      DECIMAL(10,2),
+    annual_cost_imputed         DECIMAL(10,2),
+    admission_rate_imputed      DECIMAL(5,2),
+    duration_years_imputed      DECIMAL(3,1),
+    
+    -- Features normalizadas [0,1] (mayor = mejor para el estudiante)
+    income_norm     DECIMAL(5,4),           -- MinMax(log1p)
+    cost_norm       DECIMAL(5,4),           -- 1 - MinMax(log1p), mayor = más barato
+    admission_norm  DECIMAL(5,4),           -- MinMax(raw), mayor = más fácil acceso
+    duration_norm   DECIMAL(5,4),           -- 1 - MinMax(raw), mayor = más corta
+    
+    -- Campos geo-administrativos
+    location         TEXT,                  -- Región (ej "Lima")
+    management_type  TEXT,                  -- 'Pública' | 'Privada'
+    institution_type TEXT,                  -- 'Universidad' | 'Instituto'
+    modalidad        TEXT,                  -- 'Presencial' | 'Virtual' | 'Semipresencial'
+    
+    -- Flags de imputación
+    income_imputed_flag     BOOLEAN DEFAULT FALSE,
+    cost_imputed_flag       BOOLEAN DEFAULT FALSE,
+    admission_imputed_flag  BOOLEAN DEFAULT FALSE,
+    duration_imputed_flag   BOOLEAN DEFAULT FALSE,
+    
+    -- Metadatos
+    snapshot_id      TEXT,                  -- features_20260715_143022 (de dónde vino)
+    version          INTEGER DEFAULT 1,
+    created_at       TIMESTAMPTZ DEFAULT now(),
+    updated_at       TIMESTAMPTZ DEFAULT now(),
+    
+    -- Índices
+    INDEX idx_career       ON career_offerings(career),
+    INDEX idx_institution  ON career_offerings(institution),
+    INDEX idx_location     ON career_offerings(location),
+    INDEX idx_riasec       ON career_off  erings(riasec_profile)
+);
+```
+
+**Eventos de sincronización (Opción B, futura):**
+- `CareerCreated`: se emite cuando Career Context agrega una nueva oferta.
+- `CareerUpdated`: se emite cuando cambian métricas (precios, ingresos, admisión).
+- `CareerDeleted`: se emite cuando una oferta se retira del catálogo.
+
+**Pipeline de datos:** El pipeline batch (Python, Data Pipeline) escribe a `career.career_offerings` directamente en Aurora (modo batch, vía `COPY` o `INSERT` múltiple), no a un CSV aislado. Esto garantiza que los datos siempre están disponibles para Matching Context sin pasos extras de copia.
+
 ### `StudentProfile` (Bloques A, B, C)
 
 ```python
@@ -1763,44 +2016,44 @@ class StudentProfile:
 
 ---
 
-### `CareerFeature` (fila de `features.csv`)
+### `CareerFeature` (fila de `career.career_offerings`)
+
+> **NOTA:** Este modelo ya no representa un CSV aislado. Es el mapping objeto del registro en `career.career_offerings` (Aurora PostgreSQL, schema `career`). El pipeline batch escribe directamente en Aurora.
 
 ```python
 class CareerFeature:
     """Carrera-Universidad individual con features normalizadas.
     
-    Mapeo desde features.csv real (Ponte en Carrera).
-    `riasec_profile` NO viene en el CSV crudo — se agrega vía join con una
-    tabla RIASEC de 554 carreras únicas (deduplicadas por `career`), etiquetadas
-    con Bedrock few-shot. El join se hace por la columna `career`.
+    Mapeo desde tabla career.career_offerings en Aurora PostgreSQL.
+    `riasec_profile` se agrega vía pipeline batch (join por `career`
+    contra tabla RIASEC de 554 carreras únicas).
     `management_type` (Pública/Privada) es distinto de `institution_type` (Universidad/Instituto).
     """
     
-    id: str  # Identificador único de la carrera (de features.csv)
+    id: str  # UUID de la oferta (career.career_offerings.id)
     career: str  # Nombre de carrera (ej "Estadística")
     institution: str  # Universidad que ofrece
     
-    # RIASEC etiquetado (agregado vía join externo)
-    riasec_profile: str  # 3 letras, ej "RIA"
+    # RIASEC etiquetado
+    riasec_profile: str | None  # 3 letras, ej "RIA", nullable
     riasec_source: str  # 'seed' | 'llm_tagged' | 'family_fallback' | 'pending'
     
-    # Campos geo-administrativos (del CSV crudo)
-    location: str  # Región donde está la universidad (columna features.csv)
-    management_type: str  # 'Pública' | 'Privada' — tipo de gestión
-    # NOTA: Existe también `institution_type` (Universidad/Instituto) que NO es lo mismo.
-    #       El filtro del Figma pregunta por gestión (Pública/Privada), no por tipo institucional.
+    # Campos geo-administrativos
+    location: str  # Región (columna career.career_offerings.location)
+    management_type: str  # 'Pública' | 'Privada'
+    # NOTA: institution_type (Universidad/Instituto) es campo separado, NO es el filtro del Figma.
     
-    # Features normalizadas [0,1] para scoring (todas orientadas: mayor = mejor para el estudiante)
-    income_norm: float    # MinMax(log1p(monthly_income_imputed)) — mayor ingreso = mejor
-    cost_norm: float      # 1 - MinMax(log1p(annual_cost_imputed)) — mayor = más barato (invertido)
-    admission_norm: float  # MinMax(admission_rate_imputed) — mayor = más fácil acceso (no invertido)
-    duration_norm: float   # 1 - MinMax(duration_years_imputed) — mayor = más corta (invertido)
+    # Features normalizadas [0,1] (mayor = mejor para el estudiante)
+    income_norm: float    # MinMax(log1p(monthly_income_imputed))
+    cost_norm: float      # 1 - MinMax(log1p(annual_cost_imputed)), mayor = más barato
+    admission_norm: float  # MinMax(admission_rate_imputed), mayor = más fácil acceso
+    duration_norm: float   # 1 - MinMax(duration_years_imputed), mayor = más corta
     
-    # Datos verificables imputados (valores imputados, no crudos, para mostrar al usuario)
-    monthly_income_imputed: float  # S/. / mes (imputado)
-    annual_cost_imputed: float  # S/. / año (imputado)
-    admission_rate_imputed: float  # % (imputado)
-    duration_years_imputed: float  # Años (imputado)
+    # Datos verificables imputados
+    monthly_income_imputed: float  # S/. / mes
+    annual_cost_imputed: float  # S/. / año
+    admission_rate_imputed: float  # %
+    duration_years_imputed: float  # Años
 ```
 
 ---
@@ -1812,7 +2065,7 @@ class RankingItem:
     """Un item en el ranking Top-5."""
     
     rank: int  # 1, 2, 3, 4, 5
-    id: str  # career id from features.csv
+    id: str  # career id from career.career_offerings
     career: str  # "Estadística" (antes career_name)
     institution: str  # "UNMSM"
     
@@ -3275,7 +3528,7 @@ docker-compose up -d
 
 ### Propiedad 1: Determinismo de Ranking
 
-**Invariante:** Mismo input (profile, features.csv, weights, filters) → mismo ranking Top-5 en 100% ejecuciones.
+**Invariante:** Mismo input (profile, `career.career_offerings`, weights, filters) → mismo ranking Top-5 en 100% ejecuciones.
 
 **Validación:**
 - Test de determinismo en `tests/test_scoring_determinism.py`
