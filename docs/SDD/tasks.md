@@ -41,13 +41,13 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
   - [ ] 2.2 Implementar clase `DataCleaner` con método `clean(self) -> pd.DataFrame`:
     - Constructor: lee archivo Excel con `pd.read_excel(raw_file, header=6)`.
     - Método `standardize_columns()`: renombra columnas a snake_case (mapeo exacto según catálogo MINEDU).
-    - Método `remove_empty_rows()`: elimina filas donde `career_name` o `institution` es nulo; loguea cantidad eliminada.
+    - Método `remove_empty_rows()`: elimina filas donde `career` o `institution` es nulo; loguea cantidad eliminada.
     - Método `convert_types()`: convierte columnas numéricas (`duration_years`, `monthly_income`, `annual_cost`, `admission_rate`) usando `pd.to_numeric(..., errors='coerce')`.
     - Método `clean()`: ejecuta pipeline: `standardize_columns() → remove_empty_rows() → convert_types()`.
     - Método `save(output_path)`: guarda CSV con encoding `utf-8-sig`.
     _Requerimientos: 6.1_
   - [ ] 2.3 Tests: `test_data_clean.py` — fixture con 20 filas (15 válidas, 5 con valores faltantes críticos):
-    - Verifica que `remove_empty_rows()` descarta exactamente 5 filas sin `career_name` o `institution`.
+    - Verifica que `remove_empty_rows()` descarta exactamente 5 filas sin `career` o `institution`.
     - Verifica que `convert_types()` convierte correctamente `duration_years` a float.
     - Verifica que `clean()` retorna DataFrame con 15 filas, estructura correcta, sin valores `NaN` en columnas críticas.
 
@@ -67,7 +67,7 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
       - `income_imputed_flag = (monthly_income <= 0) OR (isna)`.
       - Análogo para `annual_cost` y `admission_rate`.
     - Método `hierarchical_imputation()`: para cada variable inválida:
-      - Nivel 1: intenta mediana por `(career_family, tipo_institucion)`.
+      - Nivel 1: intenta mediana por `(career_family, management_type)`.
       - Nivel 2: intenta mediana por `career_family`.
       - Nivel 3: usa fallback desde config.
       - Crea columna `{variable}_imputed` con valores imputados.
@@ -76,10 +76,10 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
       - `admission_rate_imputed` → clamp a `[0, 90]`.
       - Log warnings si se hace reajuste.
     - Método `normalize_features()`:
-      - `ingreso_norm = normalize_variable(monthly_income_imputed, log=True, invert=False)` (mayor ingreso = mejor).
-      - `costo_norm = normalize_variable(annual_cost_imputed, log=True, invert=True)` (invertir: mayor = más barato).
+      - `income_norm = normalize_variable(monthly_income_imputed, log=True, invert=False)` (mayor ingreso = mejor).
+      - `cost_norm = normalize_variable(annual_cost_imputed, log=True, invert=True)` (invertir: mayor = más barato).
       - `admission_norm = normalize_variable(admission_rate_imputed, log=False, invert=False)` (mayor tasa = más fácil acceso).
-      - `duracion_norm = normalize_variable(duration_imputed, log=False, invert=True)` (invertir: mayor = más corta).
+      - `duration_norm = normalize_variable(duration_years_imputed, log=False, invert=True)` (invertir: mayor = más corta).
       - **Nota**: todas las normas quedan orientadas "mayor = mejor para el estudiante". El scoring NO debe volver a invertir.
     - Método `save_features(output_path)`: guarda CSV con encoding `utf-8-sig`.
     - Método `save_config()`: guarda `feature_config.json`.
@@ -89,7 +89,7 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
   - [ ] 3.3 Tests: `test_feature_engineering.py` — fixture de 20 filas:
     - Verifica que `normalize_variable` retorna valores en `[0, 1]` para todos los casos (log, invert, ambos, ninguno).
     - Verifica que `invert=True` invierte correctamente el orden: mayor input → menor output.
-    - Verifica que `run_pipeline` genera 4 columnas `*_norm`, todas en `[0, 1]`.
+    - Verifica que `run_pipeline` genera columnas `income_norm`, `cost_norm`, `admission_norm`, `duration_norm`, todas en `[0, 1]`.
     - Verifica que fixtures con valores extremos/faltantes se imputan correctamente sin errores.
 
 - [ ] 4. Implementar `data_pipeline/riasec_tagging.py` — Etiquetado RIASEC (Bedrock + Validación Muestral)
@@ -109,7 +109,7 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
   - [ ] 4.2 Implementar función `validate_sample(df: pd.DataFrame, sample_size: int = 300, seed: int = 42) -> None`:
     - Filtra filas con `riasec_source == 'llm_tagged'`.
     - Extrae muestra aleatoria determinística: `df.sample(n=sample_size, random_state=seed)`.
-    - Exporta a `data/riasec_validation_sample.csv` con columnas: `career_id, career_name, riasec_profile, riasec_source, revisado_por, correcto, notas`.
+    - Exporta a `data/riasec_validation_sample.csv` con columnas: `id, career, riasec_profile, riasec_source, revisado_por, correcto, notas`.
     - Loguea path del archivo exportado para revisión humana.
     _Requerimientos: 6.3_
   - [ ] 4.3 Implementar función `apply_family_fallback(df: pd.DataFrame) -> pd.DataFrame`:
@@ -132,16 +132,17 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
   - [ ] 5.1 Implementar dataclass `StudentProfile`:
     - Bloque A: `riasec_scores: dict[str, int]` (valores [1,10]), `riasec_code: str | None` (3 letras o None).
     - Bloque B: `w_afinidad: float`, `w_ingreso: float`, `w_costo: float`, `w_admision: float`, `w_duracion: float` (todos [0,1]).
-    - Bloque C: `region: str | None`, `tipo_institucion: str | None`, `presupuesto_max: float | None`, `modalidad: str | None`.
+    - Bloque C: `location: str | None` (región/ubicación del estudiante, se mapea a columna `location` en features.csv), `management_type: str | None` ('Pública' | 'Privada', se mapea a columna `management_type` en CSV), `presupuesto_max: float | None`, `modalidad: str | None`.
+    - NOTA: `institution_type` (Universidad/Instituto) es una columna separada en features.csv y NO es el filtro management_type del Figma.
     - Contexto: `interests: list[str]`, `strengths: list[str]`, `preferred_fields: list[str]`, `dislikes: list[str]`.
     - Estado: `confidence_score: float` ([0,1]), `confidence_reasoning: str`.
     - Defaults: si Bloque B no se prioriza, cada peso = 0.2; si usuario dice "no me importa X", peso = 0 (re-normalizar después).
     _Requerimientos: 1.1, 1.3, 2.3_
   - [ ] 5.2 Implementar dataclass `RankingItem`:
-    - `rank: int`, `career_id: str`, `career_name: str`, `institution: str`.
+    - `rank: int`, `id: str`, `career: str`, `institution: str`.
     - `concordancia_score: float` ([0,1]).
     - `scores_by_criterion: dict` con keys `{afinidad, ingreso, costo, admision, duracion}` (valores [0,1]).
-    - `datos_verificables: dict` con keys `{ingreso_promedio, costo_mensualidad, tasa_admision, duracion_anios}`.
+    - `datos_verificables: dict` con keys `{monthly_income_imputed, annual_cost_imputed, admission_rate_imputed, duration_years_imputed}`.
     - `explicacion: str`.
     _Requerimientos: 5.4_
   - [ ] 5.3 Implementar dataclass `SessionContext`:
@@ -191,11 +192,11 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - Retorna dict con pesos válidos.
     _Requerimientos: 2.2, 2.3_
   - [ ] 6.5 Implementar función `calculate_score(weights: dict, afinidad_norm: float, ingreso_norm: float, costo_norm: float, admission_norm: float, duracion_norm: float) -> float`:
-    - Todas las normas ya están orientadas "mayor = mejor" por el pipeline de datos:
-      - `ingreso_norm` (mayor ingreso = mejor).
-      - `costo_norm` (mayor = más barato, ya invertido en pipeline).
-      - `admission_norm` (mayor = más fácil acceso).
-      - `duracion_norm` (mayor = más corta, ya invertido en pipeline).
+    - Todas las normas ya están orientadas "mayor = mejor" por el pipeline de datos; los parámetros reciben los valores desde columnas `income_norm`, `cost_norm`, `duration_norm`:
+      - `ingreso_norm` recibe `row["income_norm"]` (mayor ingreso = mejor).
+      - `costo_norm` recibe `row["cost_norm"]` (mayor = más barato, ya invertido en pipeline).
+      - `admission_norm` recibe `row["admission_norm"]` (mayor = más fácil acceso).
+      - `duracion_norm` recibe `row["duration_norm"]` (mayor = más corta, ya invertido en pipeline).
     - **NO aplicar inversiones adicionales**.
     - Fórmula: `score = w_afinidad * afinidad_norm + w_ingreso * ingreso_norm + w_costo * costo_norm + w_admision * admission_norm + w_duracion * duracion_norm`.
     - Clamp a `[0, 1]`.
@@ -203,21 +204,21 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     _Requerimientos: 5.1_
   - [ ] 6.6 Implementar clase `ScoringEngine`:
     - Constructor: carga `features.csv` en DataFrame, carga `feature_config.json`.
-    - Valida schema: debe tener columnas `career_id, career_name, institution, riasec_profile, ingreso_norm, costo_norm, admission_norm, duracion_norm, region, tipo_institucion, ingreso_promedio, costo_mensualidad, tasa_admision, duracion_anios`.
+    - Valida schema: debe tener columnas `id, career, institution, riasec_profile, income_norm, cost_norm, admission_norm, duration_norm, location, management_type, monthly_income_imputed, annual_cost_imputed, admission_rate_imputed, duration_years_imputed`.
     - Si archivo no existe: raise `FileNotFoundError`.
     - Si schema incorrecto: raise `ValueError`.
   - [ ] 6.7 Implementar método `rank_and_filter(self, profile: StudentProfile, features_df: pd.DataFrame) -> list[RankingItem]`:
     - Paso 1: Calcula `riasec_code` desde `profile.riasec_scores`.
     - Paso 2: Aplica filtros duros (ignorar los con valor None, que significa "me da igual"):
-      - Si `profile.region` es not None: retener solo filas donde `region == profile.region`.
-      - Si `profile.tipo_institucion` es not None: retener solo filas donde `tipo_institucion == profile.tipo_institucion`.
-      - Si `profile.presupuesto_max` es not None: retener solo filas donde `costo_mensualidad <= profile.presupuesto_max`.
+      - Si `profile.location` es not None: retener solo filas donde `location == profile.location`.
+      - Si `profile.management_type` es not None: retener solo filas donde `management_type == profile.management_type` (usar capitalización: 'Pública'/'Privada' vs. perfil guarda 'publica'/'privada').
+      - Si `profile.presupuesto_max` es not None: retener solo filas donde `annual_cost_imputed <= profile.presupuesto_max`.
       - Si `profile.modalidad` es not None: retener solo filas donde `modalidad == profile.modalidad`.
     - Paso 3: Para cada fila restante:
       - Calcula afinidad: `calculate_affinity(riasec_code, row['riasec_profile'])`.
       - Si `riasec_profile` es None: afinidad = 0.5 (fallback), loguea warning.
-      - Calcula score: `calculate_score(weights, afinidad, row['ingreso_norm'], ...)`.
-      - Crea dict con `{rank, career_id, career_name, institution, concordancia_score, scores_by_criterion, datos_verificables}`.
+      - Calcula score: `calculate_score(weights, afinidad, row['income_norm'], ...)`.
+      - Crea dict con `{rank, id, career, institution, concordancia_score, scores_by_criterion, datos_verificables}`.
     - Paso 4: Ordena descendente por `concordancia_score`. Desempate: orden alfabético por `institution`.
     - Paso 5: Asigna ranks (1, 2, 3, ...).
     - Paso 6: Retorna lista completa (sin truncar; truncado a Top-5 es responsabilidad del llamador).
@@ -231,7 +232,7 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
   - [ ] 6.9 Tests basados en propiedades: **Propiedad 1 — Determinismo del Ranking**. **Valida: Requerimiento 5 criterio 5.2**. Estrategia:
     - Usar `hypothesis` para generar 50 conjuntos aleatorios: `weights` válidos (suma ≈ 1.0), `features_df` (hasta 200 filas con `*_norm` en [0,1]).
     - Para cada conjunto: ejecutar `rank_and_filter` dos veces con el mismo input.
-    - Invariante: ambas ejecuciones retornan el mismo orden de carreras (mismo `career_id` en posiciones idénticas).
+    - Invariante: ambas ejecuciones retornan el mismo orden de carreras (mismo `id` en posiciones idénticas).
   - [ ] 6.10 Tests basados en propiedades: **Propiedad 6 — Pesos Válidos**. **Valida: Requerimiento 2 criterio 2.1**. Estrategia:
     - Usar `hypothesis` para generar 100 rankings aleatorios (arrays de 5 elementos únicos).
     - Para cada ranking: ejecutar `calculate_weights_from_ranking` y `validate_weights`.
@@ -241,7 +242,7 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
   - [ ] 7.1 Ejecutar suite `uv run pytest data_pipeline/ tests/test_scoring.py --cov` con fixture reducido (50 carreras, 10 semilla RIASEC).
     - Verificar que `DataIngestion.download()` retorna path válido (o fallback si portal no disponible).
     - Verificar que `DataCleaner.clean()` retorna DataFrame válido sin filas incompletas.
-    - Verificar que `FeatureEngineer.run_pipeline()` genera `features.csv` con 4 columnas `*_norm` en `[0,1]`.
+    - Verificar que `FeatureEngineer.run_pipeline()` genera `features.csv` con columnas `income_norm`, `cost_norm`, `admission_norm`, `duration_norm` en `[0,1]`.
     - Verificar que `tag_careers_with_bedrock` (mockeado) tagea correctamente y `apply_family_fallback` elimina `pending`.
     - Verificar que `ScoringEngine.rank_and_filter()` produce Top-5 con scores en `[0,1]`, determinístico, desempatado correctamente.
     - Cobertura mínima 60% en `data_pipeline` y `backend/scoring.py`.
@@ -279,7 +280,8 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     _Requerimientos: 2.1, 7.1_
   - [ ] 8.4 Implementar método `interpret_bloque_c(self, message: str, history: list[dict]) -> dict`:
     - Detecta menciones de región (normaliza: "Lima" → "Lima", "arequipa" → "Arequipa"), tipo institución, presupuesto, modalidad.
-    - Retorna JSON: `{"region": str | None, "tipo_institucion": "publica" | "privada" | None, "presupuesto_max": float | None, "modalidad": "presencial" | "virtual" | None, "confidence": float}`.
+    - Retorna JSON: `{"location": str | None, "management_type": "publica" | "privada" | None, "presupuesto_max": float | None, "modalidad": "presencial" | "virtual" | None, "confidence": float}`.
+    - NOTA: el LLM devuelve estos nombres de campo; el Orchestration mapea a StudentProfile.location y StudentProfile.management_type directamente.
     - Si usuario dice "me da igual" o no menciona: valor = None.
     - Manejo de fallos y timeouts idem Bloques A/B.
     _Requerimientos: 3.1, 3.2, 7.1_
@@ -455,7 +457,7 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - 5 items, ranks 1–5.
     - `concordancia_score` en `[0,1]`.
     - `scores_by_criterion` con 5 criterios.
-    - `datos_verificables` con números reales.
+    - `datos_verificables` con claves `monthly_income_imputed`, `annual_cost_imputed`, `admission_rate_imputed`, `duration_years_imputed`.
     - `explicacion` non-empty.
   - [ ] 12.4 Ejecutar suite: `uv run pytest tests/test_*.py tests/integration/ --cov`.
     - Cobertura ≥ 60% en `backend/llm_service.py`, `backend/session.py`, `backend/orchestration.py`, `backend/app.py`.
@@ -480,8 +482,8 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - Anotar endpoint en `.env`: `AURORA_ENDPOINT=...amazonaws.com`.
   - [ ] 13.2 Crear tabla DynamoDB `universities` vía AWS Console o Terraform:
     - PK: `institution_id` (String).
-    - Atributos: `name`, `region`, `tipo_institucion`, `latitude`, `longitude`, `careers_ids` (StringSet).
-    - GSI: `region-index` (PK: `region`, SK: `institution_id`).
+    - Atributos: `name`, `location` (antes region), `management_type` (Pública/Privada, antes tipo_institucion), `latitude`, `longitude`, `careers_ids` (StringSet).
+    - GSI: `location-index` (PK: `location`, SK: `institution_id`).
   - [ ] 13.3 Crear repositorio ECR: `careermatch-repo` en región `us-east-1`.
 
 - [ ] 14. Implementar `infra/db_schema.sql` — Esquema Aurora PostgreSQL
@@ -622,13 +624,13 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
 - [ ] 19. Implementar Georreferencia — DynamoDB Universities
   - [ ] 19.1 Crear tabla DynamoDB `universities` (vía AWS Console o Terraform):
     - PK: `institution_id` (S).
-    - Atributos: `name` (S), `region` (S), `tipo_institucion` (S), `latitude` (N), `longitude` (N), `careers_ids` (SS).
-    - GSI: `region-index` con PK=`region`, SK=`institution_id`.
+    - Atributos: `name` (S), `location` (S, antes region), `management_type` (S, Pública/Privada, antes tipo_institucion), `latitude` (N), `longitude` (N), `careers_ids` (SS).
+    - GSI: `location-index` con PK=`location`, SK=`institution_id`.
     _Requerimientos: 9.3_
   - [ ] 19.2 Implementar `backend/lambda/universities_handler.py`:
-    - Endpoint `GET /universities?region=Lima` (querystring optional).
+    - Endpoint `GET /universities?location=Lima` (querystring optional).
     - Inicializa cliente DynamoDB: `dynamodb = boto3.resource('dynamodb', region_name=AWS_REGION)`.
-    - Si `region` en params: consulta GSI `region-index` → `table.query(IndexName='region-index', KeyConditionExpression='region = :region', ExpressionAttributeValues={':region': region})`.
+    - Si `location` en params: consulta GSI `location-index` → `table.query(IndexName='location-index', KeyConditionExpression='location = :location', ExpressionAttributeValues={':location': location})`.
     - Si no: `table.scan()` (retorna todas).
     - Retorna `{statusCode: 200, body: json.dumps(items)}`.
     _Requerimientos: 9.3_
@@ -636,7 +638,7 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - Mockea DynamoDB con `moto`.
     - Inserta 3 universidades (2 Lima, 1 Arequipa).
     - Verifica listado completo retorna 3 items.
-    - Verifica filtrado por región retorna 2 items (Lima).
+    - Verifica filtrado por location retorna 2 items (Lima).
 
 - [ ] 20. Checkpoint Fase 3 — Validación de Backend Híbrido e Integración
   - [ ] 20.1 Ejecutar flujo completo contra recursos mockeados:
@@ -645,7 +647,7 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - `/session/create` → obtiene token JWT válido.
     - `/chat` con token → conversa 2–4 turnos → ranking generado.
     - `/feedback` con ranking_id y score válido → persistido en Postgres.
-    - `/universities` → retorna lista, filtrado por región.
+    - `/universities` → retorna lista, filtrado por location.
   - [ ] 20.2 Verificar aislamiento por `session_id`:
     - Crear 2 sesiones distintas.
     - Session A: feedback sobre carrera X.
@@ -746,8 +748,8 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     - Div para mapa: `<div id="map"></div>`.
     - Script para Leaflet: cargar biblioteca (CDN o npm).
   - [ ] (Opcional) 24.2 Agregar en `frontend/app.js`:
-    - Función `displayMap(top5_items, region)`.
-    - Consumir `/universities?region={region}` vía `fetch()`.
+    - Función `displayMap(top5_items, location)` (recibe `profile.location`).
+    - Consumir `/universities?location={location}` vía `fetch()`.
     - Pintar marcadores de universidades en mapa (Leaflet markers).
     - Llamar después de generar ranking.
   - [ ] (Opcional) 24.3 Tests: verificación manual en navegador (no automatizados).
@@ -777,7 +779,7 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
   - [ ] 25.3 Tests: `test_pipeline_runner.py`:
     - Ejecuta `run_full_pipeline()` sobre fixture de 50 carreras (mockeando Bedrock).
     - Verifica que snapshot final tiene 50 carreras, todas con `riasec_profile` non-null.
-    - Verifica que `features.csv` tiene 4 columnas `*_norm` en `[0,1]`.
+    - Verifica que `features.csv` tiene columnas `income_norm`, `cost_norm`, `admission_norm`, `duration_norm` en `[0,1]`.
 
 - [ ] 26. Tests de Integración End-to-End con Fixtures Reales
   - [ ] 26.1 Crear fixtures en `tests/fixtures/`:
