@@ -57,7 +57,7 @@ API Gateway v2 (HTTP)
     └→ Chat conversacional, RAG, interpretación LLM — NO Fargate, NO parte de este repo
 
 Persistencia:
-    ├→ Aurora PostgreSQL: feedback, rankings, career_offerings, pgvector (career_chunks)
+    ├→ Aurora PostgreSQL: feedback, rankings, career_offerings (schema `career`), pgvector (career_chunks en schema `ai`, pendiente verificar nombre real)
     │   └→ schema `career`: catálogo de carreras, universidades, georreferencia, métricas
     └→ DynamoDB: solo Notifications (push, notificaciones push al usuario)
 
@@ -137,7 +137,7 @@ El diseño original planteaba Fargate para el chat porque "Lambda no es adecuado
 | | 8.2 Lambda `matching/handle_completed` + EventBridge I/O | `ScoringEngine.rank_and_filter` reactivo |
 | | 8.3 JWT sin estado compartido | JWT validado en API Gateway v2 (edge) + Powertools en cada Lambda |
 | **R9 — Persistencia** | 9.1 Aurora: feedback, rankings aislados | `FeedbackRecord` + índices |
-| | 9.2 pgvector Aurora: career_chunks | `career_chunks` tabla |
+| | 9.2 pgvector Aurora: career_chunks (schema `ai`, pendiente verificar nombre/dimensión real) | `career_chunks` tabla (tentativa) |
 | | 9.3 Aurora: `career.career_offerings` (carrera×universidad) | `CareerOffering` + índices (location, institution) |
 | **R10 — No funcionales** | 10.1 Scoring 6k+ combos en ≤ 1s | Benchmark test |
 | | 10.2 Aislamiento por `userId` | Queries filtrando siempre por JWT sub |
@@ -158,6 +158,14 @@ El diseño original planteaba Fargate para el chat porque "Lambda no es adecuado
 ## 6. Módulos Detallados
 
 ### `backend/embedding.py` — Embedding_Service (Amazon Bedrock Titan)
+
+> ⚠️ **MODELO PENDIENTE DE VERIFICACIÓN:** Este módulo y `RAG_Module` pertenecen al AI Advisor (repo `08-deep-agent`, Context `ai`), NO al Matching Context. La implementación actual de `08-deep-agent` **probablemente usa su propio nombre de tabla, modelo de embeddings y dimensión**, no necesariamente `career_chunks` / Titan v2 / 1024.
+>
+> **Pendiente:** Verificar contra el código real de `08-deep-agent` qué tabla (`career_chunks` u otro nombre), dimensión de vector y modelo de embeddings (`amazon.titan-embed-text-v2` u otro) utiliza. Luego:
+> - Si coincide: dejar este diseño tal cual, pero aclarar que la tabla vive en schema `ai` de Aurora (no `career`, no un Postgres local aparte).
+> - Si NO coincide: actualizar este módulo, `RAG_Module` y el DDL `career_chunks` en tarea 14.1 para reflejar el nombre/dimensión/modelo reales.
+>
+> Mientras tanto, el contenido de esta sección queda como **referencia de diseño tentativa, no implementada en este repo**. Ver `tasks.md` — Fase 4 marcada como fuera de alcance.
 
 **Responsabilidad:** Generar embeddings de texto mediante Amazon Bedrock Titan Embeddings (agnóstico de lógica, solo pasathrough a API).
 
@@ -877,6 +885,8 @@ class ScoringEngine:
 ---
 
 ### `backend/rag.py` — RAG_Module (pgvector/Aurora)
+
+> ⚠️ **NOTA:** Ver nota de verificación pendiente en §6 `EmbeddingService`. Este módulo y su tabla (`career_chunks`, dimensión 1024, Titan v2) son **tentativos** — pendientes de confrontar con la implementación real del AI Advisor (repo `08-deep-agent`, Context `ai`). Si el AI Advisor ya implementa RAG, este código no debe duplicarse en Matching Context. La tabla `career_chunks` vive en schema `ai` de Aurora, no en `career` ni en un Postgres aparte.
 
 **Responsabilidad:** Permitir consultas conversacionales sobre detalles de carreras mediante recuperación + generación.
 
@@ -2921,17 +2931,21 @@ CREATE TABLE IF NOT EXISTS feedback (
 );
 
 -- Tabla: career_chunks (para RAG, pgvector)
-CREATE TABLE IF NOT EXISTS career_chunks (
+-- NOTA: Esta tabla pertenece al AI Advisor (repo 08-deep-agent, Context `ai`).
+-- El nombre, dimensión VECTOR(1024) y modelo Titan v2 son tentativos —
+-- pendientes de verificar contra la implementación real del AI Advisor.
+-- Schema: ai (no career), no confundir con el catálogo de Matching Context.
+CREATE TABLE IF NOT EXISTS ai.career_chunks (
     id BIGSERIAL PRIMARY KEY,
     career_id TEXT NOT NULL,
     content TEXT NOT NULL,
-    embedding VECTOR(1024),
+    embedding VECTOR(1024),         -- dimensión pendiente de verificar
     metadata JSONB,
-    created_at TIMESTAMPTZ DEFAULT now(),
-    
-    INDEX idx_career ON career_chunks(career_id),
-    INDEX idx_embedding ON career_chunks USING ivfflat (embedding vector_cosine_ops)
+    created_at TIMESTAMPTZ DEFAULT now()
 );
+
+CREATE INDEX idx_career ON ai.career_chunks(career_id);
+CREATE INDEX idx_embedding ON ai.career_chunks USING ivfflat (embedding vector_cosine_ops);
 ```
 
 ### DynamoDB — Tabla universities
@@ -3157,8 +3171,9 @@ LLM_MODEL=anthropic.claude-3-5-sonnet-20241022
 BEDROCK_REGION=us-east-1
 
 # Bedrock Embeddings
+# NOTA: Pendiente verificar modelo/dimensión real usado por AI Advisor (08-deep-agent)
 EMBEDDING_PROVIDER=bedrock
-EMBEDDING_MODEL=amazon.titan-embed-text-v2
+EMBEDDING_MODEL=amazon.titan-embed-text-v2  # tentativo
 EMBEDDING_REGION=us-east-1
 
 # Aurora PostgreSQL

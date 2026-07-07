@@ -21,6 +21,7 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
     - `uv sync` genera `uv.lock` automáticamente.
   - [ ] 1.3 Crear `.env.example` con variables de entorno: `AWS_REGION=us-east-1`, `LLM_PROVIDER=bedrock`, `LLM_MODEL=anthropic.claude-3-5-sonnet-20241022`, `EMBEDDING_PROVIDER=bedrock`, `EMBEDDING_MODEL=amazon.titan-embed-text-v2`, `AURORA_ENDPOINT=...`, `AURORA_PORT=5432`, `AURORA_USER=postgres`, `AURORA_PASSWORD=...`, `AURORA_DATABASE=careermatch`, `SCHEMA_NAME=career`, `LOG_LEVEL=INFO`, `ENVIRONMENT=development`, `JWT_SECRET=...`, `JWT_ALGORITHM=HS256`.
     - NOTA: `JWT_SECRET` y `JWT_ALGORITHM` son obligatorios y deben coincidir con los que usa Identity Context (Secrets Manager compartido, no un secreto propio del servicio de scoring/chat).
+    - NOTA: La variable `EMBEDDING_MODEL=amazon.titan-embed-text-v2` es tentativa — pendiente verificar modelo real usado por AI Advisor (repo `08-deep-agent`). Idem para dimensión del vector (1024) y nombre de tabla (`career_chunks`).
   - [ ] 1.4 Crear `pytest.ini` con configuración: `testpaths = tests`, `python_files = test_*.py`, `asyncio_mode = auto`, `addopts = --tb=short -v`, markers para `unit`, `integration`, `property`. Configurar `.coveragerc` con `source = backend, data_pipeline`, umbrales mínimos 60%.
   - [ ] 1.5 Crear `README.md` inicial con: descripción del proyecto, instrucciones de instalación (`uv sync`), guía de variables de entorno, estructura de directorios, fases de desarrollo, y comandos para ejecutar tests (`uv run pytest tests/ --cov`).
   - [ ] 1.6 Crear `Dockerfile` para desarrollo local del Matching Context: imagen `python:3.10-slim`, instalar `uv` vía `COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/`, instalar dependencias de sistema (`gcc`, `postgresql-client`), copiar `pyproject.toml` y `uv.lock`, ejecutar `uv sync --no-dev`, exponer puerto 8000, healthcheck para `/health`, entrypoint `uv run uvicorn backend.app:app --host 0.0.0.0 --port 8000`. NOTA: Este Dockerfile es solo para desarrollo local del Matching Context, NO para el backend completo.
@@ -560,19 +561,20 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
     - NOTA: No crear Aurora ni EventBridge desde este plan. Consumir los ya existentes. DynamoDB se usa exclusivamente para Notifications (fuera del alcance de Matching Context).
 
 - [ ] 14. Implementar `infra/db_schema.sql` — Esquema Aurora PostgreSQL
-  - [ ] 14.1 Crear tabla `career_chunks` (para RAG, pgvector):
+  - [ ] 🚫 14.1 Crear tabla `career_chunks` (para RAG, pgvector) — pendiente verificar nombre/dimensión real contra AI Advisor:
+    > ⚠️ **NOTA:** Esta tabla pertenece al AI Advisor (repo `08-deep-agent`, Context `ai`), NO al Matching Context. El nombre `career_chunks`, dimensión `VECTOR(1024)` y modelo Titan v2 son **tentativos** — pendientes de verificar contra la implementación real. Si el AI Advisor ya crea su propia tabla, esta tarea no debe ejecutarse en Matching Context. Ver `design.md` §6 y Fase 4.
     ```sql
     CREATE EXTENSION IF NOT EXISTS vector;
-    CREATE TABLE career_chunks (
+    CREATE TABLE ai.career_chunks ( -- schema ai, no career
         id BIGSERIAL PRIMARY KEY,
         career_id TEXT NOT NULL,
         content TEXT NOT NULL,
-        embedding VECTOR(1024),
+        embedding VECTOR(1024),         -- dimensión pendiente de verificar
         metadata JSONB,
-        created_at TIMESTAMPTZ DEFAULT now(),
-        INDEX idx_career ON career_chunks(career_id),
-        INDEX idx_embedding ON career_chunks USING ivfflat (embedding vector_cosine_ops)
+        created_at TIMESTAMPTZ DEFAULT now()
     );
+    CREATE INDEX idx_career ON ai.career_chunks(career_id);
+    CREATE INDEX idx_embedding ON ai.career_chunks USING ivfflat (embedding vector_cosine_ops);
     ```
     _Requerimientos: 9.2_
   - [ ] 14.2 Crear tabla `feedback`:
@@ -743,79 +745,15 @@ La implementación avanza en cinco fases incrementales sobre AWS, cada una dejan
 
 ## Fase 4 — Capacidades Secundarias (Media): RAG Opcional, Embeddings, Georreferencia Visual
 
-- [ ] 21. Implementar `backend/embedding.py` — EmbeddingService (Bedrock Titan)
-  - [ ] 21.1 Implementar clase `EmbeddingService`:
-    - Constructor: `__init__(self, provider: str = "bedrock", model: str = "amazon.titan-embed-text-v2", region: str = "us-east-1")`.
-    - Inicializa `self.client = boto3.client('bedrock-runtime', region_name=region)`.
-    - Almacena `self.model_id = model`.
-    _Requerimientos: 9.2_
-  - [ ] 21.2 Implementar método `embed(self, text: str) -> list[float] | None`:
-    - Construye body: `{"inputText": text}`.
-    - Invoca Bedrock: `self.client.invoke_model(modelId=self.model_id, body=json.dumps(body))`.
-    - Parsea respuesta JSON: espera `{"embedding": list[float]}`.
-    - Verifica dimensión (1024 para Titan).
-    - Timeout máximo 5s.
-    - Si falla: loguea error, retorna None (no bloquea flujo principal).
-    _Requerimientos: 10.3_
-  - [ ] 21.3 Implementar método `embed_batch(self, texts: list[str]) -> list[list[float]] | None`:
-    - Opcional: versión optimizada para múltiples textos.
-    - Si no implementado: llamar `embed()` iterativamente.
-  - [ ] 21.4 Implementar método `similarity(self, vec1: list[float], vec2: list[float]) -> float`:
-    - Calcula similitud coseno entre dos vectores.
-    - Verifica dimensiones coincidan.
-    - Retorna float en `[0, 1]`.
-  - [ ] 21.5 Tests: `test_embedding_service.py`:
-    - Mockea cliente Bedrock.
-    - Verifica `embed()` retorna vector de 1024 dimensiones.
-    - Verifica timeout → retorna None.
-    - Verifica `similarity()` entre dos vectores conocidos.
+> ⚠️ **FUERA DE ALCANCE DE ESTE REPOSITORIO:** El RAG (recuperación + generación) ya vive completamente en el AI Advisor (repo `08-deep-agent`, Context `ai`). Las tareas 21 y 22 (EmbeddingService + RAGModule) asumen que Matching Context implementa su propia versión de RAG, lo que **duplicaría esfuerzo**. Estas tareas se mantienen como **referencia de diseño tentativa** por si se requiere verificar o alinear con el AI Advisor, pero **no deben implementarse aquí** a menos que la verificación contra `08-deep-agent` determine lo contrario (ver `design.md` §6 — nota de verificación pendiente). La tarea 23 ya refleja que la integración RAG es responsabilidad del AI Advisor. La tarea 24 (georreferencia visual) es opcional y no depende de RAG.
 
-- [ ] 22. Implementar `backend/rag.py` — RAGModule (pgvector/Aurora)
-  - [ ] 22.1 Implementar clase `RAGModule`:
-    - Constructor: `__init__(self, db_url: str, embedding_service: EmbeddingService)`.
-    - Inicializa conexión PostgreSQL con `psycopg2.connect(dsn=db_url)`.
-    - Almacena `embedding_service`.
-  - [ ] 22.2 Implementar método `is_career_available(self, career: str) -> bool`:
-    - Consulta: `SELECT COUNT(*) FROM career_chunks WHERE career_id ILIKE %s`.
-    - Retorna True si count > 0, False si no.
-    _Requerimientos: 10.3_
-  - [ ] 22.3 Implementar método `query(self, career: str, question: str, top_k: int = 3) -> dict`:
-    - Paso 1: Verifica si carrera disponible vía `is_career_available()`. Si no: retorna `{status: "no_documents", answer: "", sources: []}`.
-    - Paso 2: Genera embedding de `question` vía `embedding_service.embed(question)`.
-    - Si embedding falla: retorna `{status: "error", ...}`.
-    - Paso 3: Ejecuta similarity search en Aurora:
-      ```sql
-      SELECT content, metadata FROM career_chunks 
-      WHERE career_id = %s 
-      ORDER BY embedding <=> %s LIMIT %k
-      ```
-    - Paso 4: Pasa chunks recuperados + pregunta a LLM (`llm_service.generate_explanation`) para generar respuesta.
-    - Paso 5: Extrae y retorna fuentes desde `metadata`.
-    - Timeout total máximo 3s.
-    - Retorna `{status: "success", answer: str, sources: list[str], confidence: float}`.
-    _Requerimientos: 10.3_
-  - [ ] 22.4 Implementar método `index_career_chunks(self, career: str, documents: list[str], metadata: dict | None = None) -> None`:
-    - Divide cada documento en chunks (~500 caracteres, 50 char overlap).
-    - Genera embeddings para cada chunk vía `embedding_service.embed_batch()`.
-    - Inserta en tabla `career_chunks`:
-      ```sql
-      INSERT INTO career_chunks (career_id, content, embedding, metadata) 
-      VALUES (%s, %s, %s, %s)
-      ```
-    - Loguea cantidad de chunks indexados.
-    _Requerimientos: 9.2_
-  - [ ] 22.5 Implementar método `get_available_careers(self) -> list[str]`:
-    - Consulta: `SELECT DISTINCT career_id FROM career_chunks`.
-    - Retorna lista de nombres.
-  - [ ] 22.6 Tests: `test_rag.py`:
-    - Usa Postgres local con pgvector.
-    - Indexa 3 chunks de ejemplo para carrera "Estadística".
-    - Verifica `query("Estadística", "¿Qué cursos lleva?")` retorna respuesta con sources.
-    - Verifica `query()` con carrera sin RAG retorna `status="no_documents"`.
-    - Verifica embedding failure → `status="error"`.
+- [ ] 🚫 21. Implementar `backend/embedding.py` — EmbeddingService (Bedrock Titan) — **FUERA DE ALCANCE**
+  - [ ] 🚫 21.1–21.5 Sub-tareas de EmbeddingService — ver nota de fase
+- [ ] 🚫 22. Implementar `backend/rag.py` — RAGModule (pgvector/Aurora) — **FUERA DE ALCANCE**
+  - [ ] 🚫 22.1–22.6 Sub-tareas de RAGModule — ver nota de fase
 
-- [ ] 23. Integrar RAG en AI Advisor (fuera de alcance de Matching Context)
-  - [ ] (Opcional — pospuesto) 23.1 El RAG query se integra en el AI Advisor (repo `08-deep-agent`), no en el Matching Context:
+- [ ] 🚫 23. Integrar RAG en AI Advisor — ya implementado en `08-deep-agent` (referencia)
+  - [ ] 🚫 23.1 El RAG query se integra en el AI Advisor (repo `08-deep-agent`), no en el Matching Context:
     - AI Advisor recibe el ranking desde `RecommendationGenerated`.
     - Si el usuario pregunta detalles sobre una carrera del Top-5, AI Advisor invoca RAG contra Aurora (pgvector).
     - Matching Context no expone endpoint RAG — eso es responsabilidad del AI Advisor.
