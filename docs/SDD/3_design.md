@@ -111,41 +111,41 @@ El diseño original planteaba Fargate para el chat porque "Lambda no es adecuado
 
 ## 3. Requisitos (Trazabilidad)
 
-| Req | Criterio | Implementación |
-|---|---|---|
-| **R1 — RIASEC** ❄️ | 1.1 Captura de 6 scores | Cuestionario estructurado (Assessment Context) — **pendiente decisión de producto** (ver nota) |
-| | 1.2 Cálculo de `riasec_code` (3 letras) | `calculate_riasec_code` |
-| | 1.3 Captura opcional: interests, strengths | `StudentProfile.interests` |
-| **R2 — Pesos** ❄️ | 2.1 Captura de 5 pesos via orden (B1) | Cuestionario estructurado — **pendiente decisión** |
-| | 2.2 Peso explícito en 0 + re-normalización | `validate_weights` |
-| | 2.3 Defaults 0.2 si no se logra priorizar | Fallback en `validate_weights` |
-| **R3 — Filtros** ❄️ | 3.1 Filtros C descartan antes scoring | `rank_and_filter` fase 1 |
-| | 3.2 "Me da igual" desactiva filtro | `profile.location = None` |
-| **R4 — Confianza** ❄️ | 4.1 Cálculo de confianza según completitud | Cuestionario estructurado — **pendiente decisión** |
-| | 4.2 Avance si confianza suficiente | Assessment Context decide (no Matching) |
-| | 4.3 Máximo N repreguntas | Assessment Context decide (no Matching) |
-| **R5 — Scoring** | 5.1 Fórmula 5 criterios | `calculate_score` |
-| | 5.2 Determinismo | Mismo input → mismo ranking 100% |
-| | 5.3 Desempate alfabético | `diff < 0.001` → `institution` ASC |
-| | 5.4 Top-5 con datos verificables | `get_top_n(ranked_list, 5)` |
-| **R6 — Datos** | 6.1 Schema `career.career_offerings` en Aurora | `CareerOffering` modelo (career × institution con métricas) |
-| | 6.2 Etiquetado Bedrock few-shot | `tag_careers_with_bedrock` |
-| | 6.3 Validación muestral 300 carreras | `validate_sample` → CSV |
-| | 6.4 Fallback familia | `apply_family_fallback` |
-| **R7 — LLM** | 7.1 Interpretación Bloques A/B/C | `AI Advisor` (repo `08-deep-agent`, FastAPI + LangGraph) |
-| | 7.2 Validación JSON 3 reintentos | `AI Advisor._parse_and_validate_json` |
-| | 7.3 Generación explicaciones | `AI Advisor.generate_explanation` |
-| **R8 — Backend** | 8.1 REST endpoints de Matching | `GET /v1/match/recommendations` + `GET /v1/match/{careerId}/affinity` (Lambda + Powertools) |
-| | 8.2 Event handler `AssessmentCompleted` → `RecommendationGenerated` | `ScoringEngine.rank_and_filter` reactivo |
-| | 8.3 Feedback persistence (event handler asíncrono, no REST) | `FeedbackStorage` en Aurora |
-| | 8.4 JWT sin estado compartido | JWT validado en API Gateway v2 (edge) + Powertools en cada Lambda |
-| **R9 — Persistencia** | 9.1 Aurora: feedback, rankings aislados | `FeedbackRecord` + índices |
-| | 9.2 pgvector Aurora: career_chunks (schema `ai`, pendiente verificar nombre/dimensión real) | `career_chunks` tabla (tentativa) |
-| | 9.3 Aurora: `career.career_offerings` (carrera×universidad) | `CareerOffering` + índices (location, institution) |
-| **R10 — No funcionales** | 10.1 Scoring 6k+ combos en ≤ 1s | Benchmark test |
-| | 10.2 Aislamiento por `userId` | Queries filtrando siempre por JWT sub |
-| | 10.3 Fallback templado si fallan componentes | Degradación controlada |
-| | 10.4 Logging sin PII | No tokens completos, nombres OK |
+| Req | Contexto | Criterio | Implementación |
+|---|---|---|---|
+| **R1 — RIASEC** ❄️ | **Assessment** [fuera] + **Matching** [este repo] | 1.1 Captura de 6 scores | Assessment Context — cuestionario estructurado (pendiente decisión) |
+| | | 1.2 Cálculo de `riasec_code` (3 letras) | Matching Context: `calculate_riasec_code` |
+| | | 1.3 Captura opcional: interests, strengths | Matching Context: `StudentProfile.interests` |
+| **R2 — Pesos** ❄️ | **Assessment** [fuera] + **Matching** [este repo] | 2.1 Captura de 5 pesos via orden (B1) | Assessment Context — cuestionario estructurado (pendiente decisión) |
+| | | 2.2 Peso explícito en 0 + re-normalización | Matching Context: `validate_weights` |
+| | | 2.3 Defaults 0.2 si no se logra priorizar | Matching Context: fallback en `validate_weights` |
+| **R3 — Filtros** ❄️ | **Assessment** [fuera] + **Matching** [este repo] | 3.1 Filtros C descartan antes scoring | Matching Context: `rank_and_filter` fase 1 |
+| | | 3.2 "Me da igual" desactiva filtro | Matching Context: `profile.location = None` |
+| **R4 — Confianza** ❄️ | **Assessment** [fuera] | 4.1 Cálculo de confianza según completitud | Assessment Context — cuestionario estructurado (pendiente decisión) |
+| | | 4.2 Avance si confianza suficiente | Assessment Context decide |
+| | | 4.3 Máximo N repreguntas | Assessment Context decide |
+| **R5 — Scoring** | **Matching** [este repo] | 5.1 Fórmula 5 criterios | `calculate_score` |
+| | | 5.2 Determinismo | Mismo input → mismo ranking 100% |
+| | | 5.3 Desempate alfabético | `diff < 0.001` → `institution` ASC |
+| | | 5.4 Top-5 con datos verificables | `get_top_n(ranked_list, 5)` |
+| **R6 — Datos** | **Career** [fuera: schema] + **Matching** [este repo: pipeline + RIASEC] | 6.1 Schema `career.career_offerings` en Aurora | Career Context: `CareerOffering` modelo + Matching: data pipeline escribe |
+| | | 6.2 Etiquetado Bedrock few-shot | Matching Context: `tag_careers_with_bedrock` |
+| | | 6.3 Validación muestral 300 carreras | Matching Context: `validate_sample` → CSV |
+| | | 6.4 Fallback familia | Matching Context: `apply_family_fallback` |
+| **R7 — LLM** | **AI Advisor** [fuera, 08-deep-agent] | 7.1 Interpretación Bloques A/B/C | `AI Advisor` (FastAPI + LangGraph) |
+| | | 7.2 Validación JSON 3 reintentos | `AI Advisor._parse_and_validate_json` |
+| | | 7.3 Generación explicaciones | `AI Advisor.generate_explanation` |
+| **R8 — Backend** | **Matching** [este repo] | 8.1 REST endpoints de Matching | `GET /v1/match/recommendations` + `GET /v1/match/{careerId}/affinity` (Lambda + Powertools) |
+| | | 8.2 Event handler `AssessmentCompleted` → `RecommendationGenerated` | `ScoringEngine.rank_and_filter` reactivo |
+| | | 8.3 Feedback persistence (event handler asíncrono, no REST) | `FeedbackStorage` en Aurora |
+| | | 8.4 JWT sin estado compartido | JWT validado en API Gateway v2 (edge) + Powertools en cada Lambda |
+| **R9 — Persistencia** | **Matching** [este repo: feedback, rankings] + **AI Advisor** [career_chunks] + **Career** [schema career_offerings] | 9.1 Aurora: feedback, rankings aislados | Matching Context: `FeedbackRecord` + índices |
+| | | 9.2 pgvector Aurora: career_chunks (schema `ai`, pendiente verificar) | AI Advisor: `career_chunks` tabla (tentativa) |
+| | | 9.3 Aurora: `career.career_offerings` (carrera×universidad) | Career Context: `CareerOffering` + índices |
+| **R10 — No funcionales** | **Multi-contexto** | 10.1 Scoring 6k+ combos en ≤ 1s | Matching Context: benchmark test |
+| | | 10.2 Aislamiento por `userId` | Queries filtrando siempre por JWT sub (todos los contextos) |
+| | | 10.3 Fallback templado si fallan componentes | Degradación controlada (todos los contextos) |
+| | | 10.4 Logging sin PII | No tokens completos, nombres OK (todos los contextos) |
 
 ---
 
