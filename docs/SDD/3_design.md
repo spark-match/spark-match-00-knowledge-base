@@ -1012,7 +1012,7 @@ class Orchestration:
         Args:
             session_token: Token de sesión (validado por HTTP layer)
             message: Mensaje del usuario en español
-            metadata: Filtros opcionales {location, budget_max, management_type}
+            metadata: Filtros opcionales {location, budget_max (presupuesto anual), management_type}
         
         Returns:
             ChatResponse:
@@ -1883,9 +1883,9 @@ class FeedbackRecord:
     
     # Entrada original del usuario
     user_input: str  # Consulta en español
-    user_input_region: str | None  # Filtro región si especificó
-    user_input_budget_max: float | None  # Presupuesto máximo
-    user_input_institution_type: str | None  # Tipo institución filtro
+    user_input_location: str | None  # Filtro ubicación/región si especificó
+    user_input_budget_max: float | None  # Presupuesto máximo ANUAL (en soles, se compara con annual_cost_imputed)
+    user_input_management_type: str | None  # 'Pública' | 'Privada' (antes institution_type)
     
     # Perfil interpretado (snapshot)
     profile_interpreted: dict  # StudentProfile serializado a JSON
@@ -2399,10 +2399,10 @@ END FUNCTION
 {
     "message": "Me interesan las matemáticas y el análisis de datos",
     "metadata": {
-        "location": null,
-        "budget_max": null,
-        "management_type": null
-    }
+        "location": null,         # Ubicación/región del estudiante
+        "budget_max": null,       # Presupuesto máximo ANUAL (soles), se compara con annual_cost_imputed
+        "management_type": null   # 'Pública' | 'Privada'
+    }                             # NOTA: budget_max es anual, NO mensual
 }
 ```
 
@@ -2629,7 +2629,7 @@ CREATE TABLE IF NOT EXISTS feedback (
     -- Entrada del usuario
     user_input TEXT NOT NULL,
     user_input_location VARCHAR(100),  -- región/ubicación (columna features.csv: location)
-    user_input_budget_max DECIMAL(10,2),
+    user_input_budget_max DECIMAL(10,2),  -- Presupuesto máximo ANUAL (soles), se compara con annual_cost_imputed
     user_input_management_type VARCHAR(20),  -- 'Pública' | 'Privada' (antes tipo_institucion)
     -- NOTA: institution_type (Universidad/Instituto) es un campo distinto en features.csv
     
@@ -2729,7 +2729,7 @@ CREATE TABLE feedback (
     
     user_input TEXT NOT NULL,
     user_input_location TEXT,  -- región/ubicación
-    user_input_budget_max REAL,
+    user_input_budget_max REAL,  -- Presupuesto máximo ANUAL (soles), se compara con annual_cost_imputed
     user_input_management_type TEXT,  -- 'Pública' | 'Privada'
     
     profile_riasec_scores TEXT,  -- JSON serializado
