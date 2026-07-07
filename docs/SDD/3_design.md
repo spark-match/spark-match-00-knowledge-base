@@ -1,8 +1,5 @@
 # design.md — CareerMatch Perú (Consolidado, foco AWS)
 
-> **⚠️ PENDIENTE: Definir fuente de verdad del stack backend.**  
-> El backend de Angel (rama `feature/scaffolding-fase-1`) usa **TypeScript + Lambda + Identity completo (register/login/JWT)**, mientras que este documento asume **Python + Fargate + sesión anónima**. Ambos coexisten en el repo. **NO editar las secciones de Auth/JWT de este documento** hasta que el equipo decida qué stack adoptar. Ver `OBSERVACIONES_tasks.md` § Alineación de stack para contexto.
-
 ## 1. Descripción General
 
 **CareerMatch Perú** es un sistema de recomendación de carreras universitarias que opera mediante un asistente conversacional basado en LLM, integrado con un motor de evaluación multi-criterio determinístico y auditable. El flujo principal es:
@@ -49,7 +46,6 @@ FastAPI Service (single container):
       ├→ LLM_Layer (Bedrock/Claude-3.5-Sonnet)
       ├→ Session_Manager (in-memory, TTL=1800s)
       ├→ Scoring_Engine (determinístico, en-process)
-      ├→ Auth_Service (session_id anónimo en-memoria)
       ├→ Feedback_Storage (PostgreSQL local)
       └→ RAG_Module (opcional, con pgvector)
 
@@ -98,7 +94,7 @@ Para el MVP/demo, todo corre en un **solo servicio FastAPI** (contenedor Docker)
 |---|---|---|
 | Compute | 1 contenedor FastAPI (Fargate o local) | Lambda (stateless) + Fargate (stateful) |
 | Endpoints | `/chat`, `/feedback`, `/universities` todo en FastAPI | API Gateway → Lambda (/session, /feedback, /universities) + VPC Link → Fargate (/chat) |
-| Sesión | `session_id` anónimo en memoria | JWT sin estado compartido |
+| Sesión | JWT emitido por Identity Context, validado en API Gateway + por Lambda | JWT sin estado compartido |
 | Persistencia | PostgreSQL local (o Aurora si disponible) | Aurora PostgreSQL + DynamoDB |
 | Frontend | Sirve desde FastAPI (static files) o CDN | API Gateway + CloudFront |
 | Despliegue | `docker-compose up` | AWS SAM / Terraform multi-stack |
@@ -156,7 +152,7 @@ Lambda no es adecuado: timeout corto (15 min), stateless forzado, costo por llam
 | | 7.3 Generación explicaciones | `generate_explanation` |
 | **R8 — Backend** | 8.1 Lambda `/session`, `/feedback`, `/universities` | 3 handlers |
 | | 8.2 Fargate `/chat` + SessionContext memoria | `Orchestrator.handle_turn` |
-| | 8.3 JWT sin estado compartido | `Auth_Service` + validación local |
+| | 8.3 JWT sin estado compartido | JWT validado en API Gateway v2 (edge) + Powertools en cada Lambda |
 | **R9 — Persistencia** | 9.1 Aurora: feedback, rankings aislados | `FeedbackRecord` + índices |
 | | 9.2 pgvector Aurora: career_chunks | `career_chunks` tabla |
 | | 9.3 DynamoDB: universities + GSI location-index | `universities` tabla |
