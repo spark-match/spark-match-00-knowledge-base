@@ -172,7 +172,7 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
       - Posición 2 (index 2): +1 punto.
       - No encontrada: 0 puntos.
     - `score_crudo = suma de puntos`.
-    - `afinidad_norm = score_crudo / 18.0` (máximo posible: 3×3 + 2×3 + 1×3).
+    - `afinidad_norm = score_crudo / 6.0` (máximo posible: 3+2+1 = 6).
     - Retorna valor en `[0, 1]`.
     _Requerimientos: 5.1_
   - [ ] 6.3 Implementar función `calculate_weights_from_ranking(order: list[str]) -> dict[str, float]`:
@@ -222,7 +222,7 @@ La implementación avanza en cinco fases estrictamente incrementales sobre AWS, 
     _Requerimientos: 3.1, 3.2, 5.2, 5.3, 5.4, 10.1_
   - [ ] 6.8 Tests: `test_scoring.py` — fixture de 5 carreras:
     - Verifica `calculate_riasec_code` con ejemplo: `{R:8, I:9, A:7, S:6, E:5, C:4}` → `"IRA"`.
-    - Verifica `calculate_affinity`: `student_code="RIA", career_profile="RIA"` → `6/18 ≈ 0.33`.
+    - Verifica `calculate_affinity`: `student_code="RIA", career_profile="RIA"` → `6/6 = 1.0`.
     - Verifica `calculate_weights_from_ranking`: orden `["afinidad", "ingreso", ...]` → pesos suman 1.0.
     - Verifica `calculate_score` con valores conocidos.
     - Verifica desempate: dos carreras con scores `0.85` y `0.8499` (diff < 0.001) se ordenan alfabético por institution.

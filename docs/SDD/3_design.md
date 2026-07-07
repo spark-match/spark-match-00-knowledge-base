@@ -540,7 +540,7 @@ class ScoringEngine:
         - No aparece: 0 puntos
         
         score_crudo = suma de puntos para cada letra de career_profile
-        afinidad_norm = score_crudo / 18  (máximo posible)
+        afinidad_norm = score_crudo / 6.0  (máximo posible: 3+2+1 = 6)
         
         Determinismo:
         - Mismo input → mismo output en todas las ejecuciones
@@ -2019,8 +2019,8 @@ FUNCTION calculate_affinity(
         score_crudo += points
     
     // Normalizar a [0,1]
-    // Máximo posible: 3+2+1 = 6 por cada letra → 18 para 3 letras
-    afinidad_norm = score_crudo / 18.0
+    // Máximo posible: 3+2+1 = 6
+    afinidad_norm = score_crudo / 6.0
     
     RETURN clamp(afinidad_norm, 0.0, 1.0)
 
@@ -2030,10 +2030,12 @@ END FUNCTION
 **Ejemplo:**
 ```
 student_code = "RIA"
-career_profile = "RIA"  → R:pos0(+3), I:pos1(+2), A:pos2(+1) = 6 → 6/18 = 0.33
-career_profile = "AIR"  → A:pos2(+1), I:pos1(+2), R:pos0(+3) = 6 → 6/18 = 0.33
-career_profile = "SIA"  → S:not_found(0), I:pos1(+2), A:pos2(+1) = 3 → 3/18 = 0.17
+career_profile = "RIA"  → R:pos0(+3), I:pos1(+2), A:pos2(+1) = 6 → 6/6 = 1.0
+career_profile = "AIR"  → A:pos2(+1), I:pos1(+2), R:pos0(+3) = 6 → 6/6 = 1.0
+career_profile = "SIA"  → S:not_found(0), I:pos1(+2), A:pos2(+1) = 3 → 3/6 = 0.5
 ```
+
+> **Nota abierta a decidir con el equipo:** Con el algoritmo actual `student_code="RIA"` y `career_profile="AIR"` dan el mismo puntaje (1.0) porque se busca la letra en cualquier posición del perfil de carrera (`str.find`), no se compara posición-a-posición. Si se desea que el orden exacto importe (ej. que "RIA" empate perfecto puntúe más que "AIR"), habría que implementar comparación posicional. Confirmar con el equipo antes de modificar código.
 
 ---
 
