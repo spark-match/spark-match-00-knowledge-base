@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # CODEOWNERS — Spark Match Knowledge Base (00)
 #
 # Política de aprobación (ADR-003 branch-based deployment):
@@ -7,6 +8,83 @@
 #
 # CODE OWNERS del repo: @spark-match/tech-leads
 #   Miembros actuales: ahincho, dbarretol
+=======
+# CODEOWNERS — Spark Match Knowledge Base
+
+
+# =============================================================================
+# Catch-all: cualquier archivo no listado abajo
+# Aprobación: tech-leads (governance técnica de la org)
+# =============================================================================
+*                                          @spark-match/tech-leads
+
+# =============================================================================
+# Onboarding — material para nuevos miembros
+# Aprobación de tech-leads + devops
+# =============================================================================
+/onboarding/                               @spark-match/tech-leads @spark-match/devops
+/onboarding/**/*                           @spark-match/tech-leads @spark-match/devops
+
+# =============================================================================
+# Decisiones cross-team (ADRs organizacionales)
+# Aprobación de tech-leads (quienes firman ADRs)
+# =============================================================================
+/decisions/                                @spark-match/tech-leads
+/decisions/**/*                            @spark-match/tech-leads
+
+# =============================================================================
+# Arquitectura — documentos de diseño
+# Aprobación de devops
+# =============================================================================
+/architecture/                             @spark-match/devops
+/architecture/**/*                         @spark-match/devops
+
+# =============================================================================
+# Postmortems — análisis de incidentes
+# Aprobación de devops
+# =============================================================================
+/postmortems/                              @spark-match/devops
+/postmortems/**/*                          @spark-match/devops
+
+# =============================================================================
+# Investigación — papers, spikes, comparativas
+# Aprobación de tech-leads
+# =============================================================================
+/research/                                 @spark-match/tech-leads
+/research/**/*                             @spark-match/tech-leads
+
+# =============================================================================
+# Documentación raíz — archivos sensibles
+# Cambios al README/CONTRIBUTING/INDEX/LICENSE afectan a TODA la org.
+# Aprobación de tech-leads.
+# =============================================================================
+/README.md                                 @spark-match/tech-leads
+/CONTRIBUTING.md                           @spark-match/tech-leads
+/INDEX.md                                  @spark-match/tech-leads
+/LICENSE                                   @spark-match/tech-leads
+
+# =============================================================================
+# Configuración de GitHub — CODEOWNERS, workflows, templates
+# Cambios en CI/CD requieren revisión de devops.
+# =============================================================================
+/.github/                                  @spark-match/devops
+/.github/CODEOWNERS                        @spark-match/tech-leads @spark-match/devops
+
+# =============================================================================
+# Notas operativas
+# =============================================================================
+# 1. Política de aprobación de PRs: todo PR requiere 1 aprobación de un
+#    CODE OWNER técnico (tech-leads para gobernanza general, devops para
+#    infraestructura/arquitectura). product-owners se solicita manualmente
+#    al promover a `main`.
+#
+# 2. El team `@spark-match/tech-leads` está compuesto por dbarretol + ahincho.
+#    Cuando un PR toca un path sin owner específico, GitHub asigna reviewers
+#    de este team.
+#
+# 3. Para añadir un nuevo CODE OWNER, agregarlo al team correspondiente:
+#      gh api -X PUT orgs/spark-match/teams/tech-leads/memberships/<user> -f role=member
+>>>>>>> 25135b293f276827f199f07cc947480eca07d1a8
 #
 # Nota: este repo contiene decisiones arquitectónicas (ADRs). El CODE
 # OWNER es tech-leads porque son quienes firman las decisiones técnicas.
