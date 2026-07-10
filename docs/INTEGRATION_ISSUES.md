@@ -27,6 +27,8 @@ No es una lista de bugs internos de cada repo — eso va en los issues de cada r
 | [INT-006](#int-006) | Backend ↔ tasks.md | Stack real en TypeScript; el `tasks.md` asume Python/FastAPI | Riesgo de retrabajo al repartir tareas | 🔴 Abierto |
 | [INT-007](#int-007) | Frontend ↔ Prototipo | Scaffold en Angular 21; el prototipo del Figma es Lovable (React) | El código del prototipo no se reutiliza | 🔴 Abierto |
 | [INT-008](#int-008) | Frontend ↔ Datos | La UI afirma "datos actualizados a diciembre 2024", sin respaldo | Afirmación pública posiblemente falsa | 🔴 Abierto |
+| [INT-009](#int-009) | Gobernanza ↔ Data pipeline | El `.gitignore` de la org tiene `*.csv` | `git add` ignora en silencio los entregables del pipeline | 🟡 En curso |
+| [INT-010](#int-010) | CI ↔ Testing | Lint y tests del frontend son no-bloqueantes (`\|\| echo`) | "CI verde" no significa que los tests pasen | 🔴 Abierto |
 
 ---
 
@@ -123,6 +125,51 @@ Ni el `README.md` ni el `Diccionario de datos.md` del repo `05-data-pipeline` in
 corte del `raw.xlsx`. Es una afirmación pública sobre datos oficiales.
 
 - **Acción**: confirmar la fecha real con @Nikolai antes de publicarla, o retirarla de la UI.
+
+## INT-009
+
+**`*.csv` en el `.gitignore` ignora los entregables del pipeline** · Gobernanza ↔ Data pipeline · 🟡 En curso
+
+El `.gitignore` estándar añadido a `05-data-pipeline` incluye la regla **`*.csv`** bajo el comentario
+*"NUNCA commitear data cruda"*. Pero **este repo sí versiona su dataset** (`data/features.csv`,
+`data/filtered.csv`, `snapshots/features/*.csv`).
+
+Los archivos ya trackeados no se pierden, pero **cualquier CSV nuevo se ignora en silencio**.
+Verificado con `git check-ignore`:
+
+```
+.gitignore:119:*.csv    data/riasec_tags.csv
+.gitignore:119:*.csv    data/riasec_validation_sample.csv
+```
+
+Esos dos son justamente los entregables de la tarea **B-04** (las 554 carreras etiquetadas y la
+muestra para revisión humana). Sin excepciones, `git add` los descarta sin avisar.
+
+- Incoherencia adicional: la regla dice "nunca commitear data cruda", pero **`data/raw.xlsx` sí está
+  commiteado** y no se ignora (`.xlsx` no aparece en las reglas).
+- **En curso**: el PR `feature/riasec-tagging` adopta el `.gitignore` de la org y le añade una sección
+  de excepciones (`!data/features.csv`, `!data/riasec_tags.csv`, `!snapshots/**/*.csv`…).
+- **Pendiente**: decidir si la plantilla de la org debe llevar `*.csv` para repos de datos.
+
+## INT-010
+
+**Lint y tests del frontend no pueden fallar el CI** · CI ↔ Testing · 🔴 Abierto
+
+En `04-frontend`, el workflow de CI ejecuta ambos pasos con `|| echo`, así que **siempre terminan en
+verde**, aun cuando fallen:
+
+```yaml
+run: npm run lint || echo "Lint warnings present (non-blocking)"
+run: npm test -- --watch=false --browsers=ChromeHeadlessCI || echo "Tests skipped (browser config pending — non-blocking)"
+```
+
+El propio mensaje sugiere que los tests **ni siquiera se ejecutan**: falta la dependencia
+`@vitest/browser-playwright` para el setup de Angular 21 + Vitest.
+
+Está marcado como temporal y documentado en el PR, pero mientras siga así **"CI verde" no significa
+"los tests pasan"** en el frontend. Riesgo de llegar a la demo con la red de seguridad desactivada.
+
+- **Acción**: instalar la dependencia que falta y quitar los `|| echo` antes de la Fase 3 (integración).
 
 ---
 
