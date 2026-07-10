@@ -1,3 +1,25 @@
+---
+title: "Design Specification — CareerMatch Perú"
+author: "@FabiTaparaQuispe"
+date: 2026-07-04
+updated: 2026-07-09
+tags:
+  - area/architecture
+  - topic/architecture/design
+  - status/draft
+audience:
+  - tech-leads
+  - backend-devs
+  - frontend-devs
+  - ai-devs
+status: draft
+related:
+  - "[[MOC-architecture]]"
+  - "[[docs/SDD/1_PRD]]"
+  - "[[docs/SDD/2_requirements]]"
+  - "[[docs/SDD/ARCHITECTURE]]"
+---
+
 # design.md
 
 ## Descripción General
