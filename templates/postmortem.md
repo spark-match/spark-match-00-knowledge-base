@@ -1,10 +1,33 @@
-# 🚨 Postmortem: <Título del incidente>
+---
+title: "Postmortem: {{title}}"
+author: "{{author}}"
+date: <% tp.date.now("YYYY-MM-DD") %>
+updated: <% tp.date.now("YYYY-MM-DD") %>
+tags:
+  - area/postmortems
+  - status/draft
+audience:
+  - tech-leads
+  - devops
+status: draft
+template: postmortem
+severity: "Media"
+incidentDate: ""
+duration: ""
+detectedBy: ""
+resolvedBy: ""
+related: []
+aliases: []
+---
 
+# 🚨 Postmortem: {{title}}
+
+> [!warning] **Metadata del incidente**
 > **Severidad**: 🔴 Crítica | 🟠 Alta | 🟡 Media | 🟢 Baja
-> **Fecha del incidente**: YYYY-MM-DD
-> **Duración**: Xh Ymin
-> **Detectado por**: <persona o sistema>
-> **Resuelto por**: <persona o equipo>
+> **Fecha del incidente**: {{incidentDate}}
+> **Duración**: {{duration}}
+> **Detectado por**: {{detectedBy}}
+> **Resuelto por**: {{resolvedBy}}
 > **Status**: 🟡 Borrador | 🟢 Publicado
 
 ---
@@ -28,6 +51,7 @@
 <!-- Explica la causa técnica raíz. Usa "5 Whys" si ayuda. -->
 
 **5 Whys**:
+
 1. ¿Por qué...? Porque...
 2. ¿Por qué...? Porque...
 
@@ -62,6 +86,12 @@
 ### 🤯 Qué nos sorprendió
 
 - ...
+
+## 🔗 Wikilinks relacionados
+
+- [[00 - Home]]
+- [[MOC-postmortems]]
+- [[MOC-incidents]]
 
 ## 📎 Anexos
 

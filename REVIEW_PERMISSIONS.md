@@ -1,3 +1,23 @@
+---
+title: "Auditoría y Configuración de Permisos — 00-knowledge-base"
+author: "@ahincho"
+date: 2026-07-04
+updated: 2026-07-09
+tags:
+  - area/admin
+  - topic/governance/permissions
+  - status/published
+audience:
+  - product-owners
+  - devops
+  - tech-leads
+status: published
+related:
+  - "[[decisions/ADR-002-incident-pr-sin-reviewers]]"
+  - "[[MOC-postmortems]]"
+  - "[[CONTRIBUTING]]"
+---
+
 # 🔍 Auditoría y Configuración de Permisos — `spark-match-00-knowledge-base`
 
 > Documento de revisión técnica + bitácora de los cambios de gobernanza aplicados.

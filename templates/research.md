@@ -1,9 +1,30 @@
-# 🔬 Investigación: <Título>
+---
+title: "Investigación: {{title}}"
+author: "{{author}}"
+date: <% tp.date.now("YYYY-MM-DD") %>
+updated: <% tp.date.now("YYYY-MM-DD") %>
+tags:
+  - area/research
+  - status/in-progress
+audience:
+  - tech-leads
+status: in-progress
+template: research
+investigator: "{{author}}"
+startDate: ""
+endDate: ""
+hypothesis: ""
+related: []
+aliases: []
+---
 
+# 🔬 Investigación: {{title}}
+
+> [!info] **Metadata de la investigación**
 > **Status**: 🟡 En curso | 🟢 Completa | ⚫ Abandonada
-> **Fecha inicio**: YYYY-MM-DD
-> **Fecha fin**: YYYY-MM-DD (si aplica)
-> **Investigadores**: @usuario1, @usuario2
+> **Fecha inicio**: <% tp.file.creation_date("YYYY-MM-DD") %>
+> **Fecha fin**: (si aplica)
+> **Investigadores**: @<% tp.user.username() %>
 
 ---
 
@@ -51,6 +72,11 @@
 ## ✅ Conclusiones
 
 <!-- Recomendación basada en los resultados. -->
+
+## 🔗 Wikilinks relacionados
+
+- [[00 - Home]]
+- [[MOC-research]]
 
 ## 📚 Referencias
 

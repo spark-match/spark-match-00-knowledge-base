@@ -1,8 +1,30 @@
-# 📖 How-to: <Título descriptivo>
+---
+title: "How-to: {{title}}"
+author: "{{author}}"
+date: <% tp.date.now("YYYY-MM-DD") %>
+updated: <% tp.date.now("YYYY-MM-DD") %>
+tags:
+  - area/guides
+  - status/draft
+audience:
+  - backend-devs
+  - frontend-devs
+  - devops
+  - ai-devs
+status: draft
+template: how-to
+estimatedTime: 0
+prerequisites: []
+related: []
+aliases: []
+---
 
-> **Audiencia**: <equipos a los que va dirigido>
-> **Tiempo estimado**: X minutos
-> **Prerrequisitos**: <qué necesitas saber o tener instalado>
+# 📖 How-to: {{title}}
+
+> [!info] **Metadata**
+> **Audiencia**: {{audience}}
+> **Tiempo estimado**: <% tp.user.default("30 minutos") %>
+> **Prerrequisitos**: {{prerequisites}}
 
 ---
 
@@ -66,6 +88,11 @@ curl https://api.example.com/health
 **Causa probable**: ...
 
 **Solución**: ...
+
+## 🔗 Wikilinks relacionados
+
+- [[00 - Home]]
+- [[MOC-guides]]
 
 ## 📚 Referencias
 

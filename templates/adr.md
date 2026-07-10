@@ -1,17 +1,36 @@
-# 🟣 AdR-NNN: Título corto
+---
+title: "<% tp.user.prefix_title('ADR') %>: {{title}}"
+author: "{{author}}"
+date: <% tp.date.now("YYYY-MM-DD") %>
+updated: <% tp.date.now("YYYY-MM-DD") %>
+tags:
+  - area/decisions
+  - status/draft
+audience:
+  - tech-leads
+status: draft
+template: adr
+adrNumber: ""
+related: []
+aliases: []
+---
 
-> **Architecture Decision Record** — captura el contexto, opciones y consecuencias de una decisión arquitectónica significativa.
+# 🟣 {{title}}
 
+> [!info] **Architecture Decision Record**
+> Captura el contexto, opciones y consecuencias de una decisión arquitectónica significativa.
+
+> [!quote] **Metadata del ADR**
 > **Estado**: 🟡 Propuesto | 🟢 Aceptado | 🟠 Deprecado | ⚫ Superseded by ADR-NNN
-> **Fecha**: YYYY-MM-DD
-> **Autores**: @usuario1, @usuario2
-> **Reviewers**: @usuario3 (opcional)
+> **Fecha**: <% tp.date.now("YYYY-MM-DD") %>
+> **Autores**: @<% tp.user.username() %>
+> **Reviewers**: @usuario2 (opcional)
 
 ---
 
 ## 🎯 Contexto
 
-<!-- ¿Qué problema estamos resolviendo? ¿QuéConstraints (tiempo, presupuesto, equipo) tenemos? -->
+<!-- ¿Qué problema estamos resolviendo? ¿Qué constraints (tiempo, presupuesto, equipo) tenemos? -->
 
 ## 🔄 Opciones consideradas
 
@@ -38,6 +57,12 @@
 ### Mitigaciones
 
 - ...
+
+## 🔗 Wikilinks relacionados
+
+<!-- Si esta decisión se vincula con otros docs del vault, listarlos aquí como wikilinks para activar backlinks -->
+- [[00 - Home]]
+- [[MOC-decisions]]
 
 ## 📚 Referencias
 

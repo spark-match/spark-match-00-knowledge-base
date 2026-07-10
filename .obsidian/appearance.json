@@ -1,0 +1,34 @@
+{
+  "baseFontSize": 16,
+  "accentColor": "",
+  "theme": "obsidian",
+  "cssTheme": "minimal",
+  "toggleMarkdown": true,
+  "translucency": false,
+  "baseFontFamily": "JetBrains Mono",
+  "interfaceFontFamily": "Inter",
+  "markdownFontFamily": "JetBrains Mono",
+  "uiFontFamily": "Inter",
+  "transientEditor": false,
+  "alwaysUpdateLinks": false,
+  "showLineNumber": true,
+  "showInlineTitle": true,
+  "minimalAbsoluteDateFormat": "YYYY-MM-DD",
+  "fullDateFormat": "YYYY-MM-DD HH:mm",
+  "showBacklink": true,
+  "showOutline": true,
+  "showTags": true,
+  "windowOverflow": true,
+  "ribbon": true,
+  "useTightHeadings": false,
+  "readableLineLength": true,
+  "relativeDateFormat": "dd.MM.yyyy HH:mm",
+  "themeSettings": {
+    "minimal": {
+      "accentColor": "#7c3aed",
+      "primaryColor": "#7c3aed",
+      "baseFontSize": "16px"
+    }
+  },
+  "tabs": ["markdown", "source", "preview"]
+}

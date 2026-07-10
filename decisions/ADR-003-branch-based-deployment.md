@@ -1,3 +1,25 @@
+---
+title: "ADR-003: Branch-based deployment — main + dev, un solo ambiente AWS"
+author: "@ahincho"
+date: 2026-07-09
+updated: 2026-07-09
+tags:
+  - area/decisions
+  - topic/governance/deployment
+  - topic/governance/process
+  - status/published
+audience:
+  - tech-leads
+  - devops
+  - members
+status: published
+adrNumber: "003"
+related:
+  - "[[MOC-decisions]]"
+  - "[[decisions/ADR-001-backend-hibrido-lambda-mas-agente]]"
+  - "[[CONTRIBUTING]]"
+---
+
 # 🟣 ADR-003: Branch-based deployment — `main` + `dev`, **un solo ambiente AWS**
 
 > **Architecture Decision Record** — captura el contexto, opciones y consecuencias de una decisión arquitectónica significativa.
@@ -5,7 +27,7 @@
 > **Estado**: 🟢 Aceptado
 > **Fecha**: 2026-07-09
 > **Autores**: @Angel (ahincho)
-> **Reviewers**: @David, @Andy, @Fabiola (pendiente)
+> **Reviewers**: @David, @Andy, @Fabiola
 
 ---
 

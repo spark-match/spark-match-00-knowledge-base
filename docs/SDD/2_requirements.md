@@ -1,3 +1,23 @@
+---
+title: "Requirements Specification — CareerMatch Perú"
+author: "@FabiTaparaQuispe"
+date: 2026-07-04
+updated: 2026-07-09
+tags:
+  - area/architecture
+  - topic/product/requirements
+  - status/draft
+audience:
+  - product-owners
+  - tech-leads
+  - members
+status: draft
+related:
+  - "[[MOC-architecture]]"
+  - "[[docs/SDD/1_PRD]]"
+  - "[[docs/SDD/3_design]]"
+---
+
 # requirements.md
 
 ## Introducción

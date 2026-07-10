@@ -1,9 +1,10 @@
 # =============================================================================
 # Spark Match Knowledge Base (00-knowledge-base) - .gitignore
 # =============================================================================
-# Generado segun ADR-003 branch-based deployment y estandares de la org.
-# Version: 1.0.0 - 2026-07-09
-# Tipo: Solo docs (Markdown, decisiones, SDD)
+# Generado segun ADR-003 branch-based deployment y adaptacion a vault Obsidian.
+# Version: 1.1.0 - 2026-07-09
+# Tipo: Solo docs (Markdown, decisiones, SDD) + config compartida de Obsidian
+# Referencia: .admin/obsidian-viability-analysis.md
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -24,24 +25,29 @@ $RECYCLE.BIN/
 *~
 
 # -----------------------------------------------------------------------------
-# Obsidian (vault personal usado para redactar)
+# Obsidian: estado personal (NO compartir entre usuarios)
+# Cada usuario tiene su propio layout de workspace y config de graph.
+# Estos archivos son regenerados por Obsidian automaticamente.
 # -----------------------------------------------------------------------------
-.obsidian/
-.obsidian.vimrc
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
+.obsidian/graph.json
+.obsidian/cache/
+.obsidian/plugins/
+.obsidian/themes/Personal/
+.obsidian/hotkeys.json
+
+# --- Excepciones: la config compartida SI debe commitearse ---
+!.obsidian/app.json
+!.obsidian/appearance.json
+!.obsidian/core-plugins.json
+!.obsidian/community-plugins.json
+
+# -----------------------------------------------------------------------------
+# Obsidian: trash y caches
+# -----------------------------------------------------------------------------
 .trash/
-**/.obsidian/workspace
-
-# -----------------------------------------------------------------------------
-# Admin scripts (notas personales)
-# -----------------------------------------------------------------------------
-.admin/
-
-# -----------------------------------------------------------------------------
-# Plantillas locales (no se commitean)
-# -----------------------------------------------------------------------------
-drafts/
-private/
-TODO_local.md
+.cache/
 
 # -----------------------------------------------------------------------------
 # Documentacion autogenerada
@@ -51,6 +57,20 @@ docs/build/
 *.pdf.local
 
 # -----------------------------------------------------------------------------
-# Cache
+# Imagenes y adjuntos pesados (referenciar con wikilinks, no trackear los binarios)
+# Si necesitas versionar imagenes, ponerlas en attachments/ y agregar nombre
 # -----------------------------------------------------------------------------
-.cache/
+# attachments/*  # (comentado: descomentar si el vault se vuelve pesado)
+
+# -----------------------------------------------------------------------------
+# Local drafts (no compartir)
+# -----------------------------------------------------------------------------
+drafts/
+private/
+
+# -----------------------------------------------------------------------------
+# Notas personales locales
+# -----------------------------------------------------------------------------
+TODO_local.md
+NOTAS_PERSONALES.md
+.scratch/

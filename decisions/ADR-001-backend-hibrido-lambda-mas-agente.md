@@ -1,11 +1,33 @@
+---
+title: "ADR-001: Backend híbrido — Lambda (CRUD/EDA) + servidor Python dedicado (agente)"
+author: "@ahincho"
+date: 2026-07-05
+updated: 2026-07-09
+tags:
+  - area/decisions
+  - topic/architecture/backend
+  - topic/ai/agent
+  - status/published
+audience:
+  - backend-devs
+  - ai-devs
+  - tech-leads
+status: published
+adrNumber: "001"
+related:
+  - "[[MOC-decisions]]"
+  - "[[decisions/ADR-003-branch-based-deployment]]"
+  - "[[docs/SDD/4_reglas-negocio-agente]]"
+---
+
 # 🟣 ADR-001: Backend híbrido — Lambda (CRUD/EDA) + servidor Python dedicado (agente)
 
 > **Architecture Decision Record** — captura el contexto, opciones y consecuencias de una decisión arquitectónica significativa.
 
-> **Estado**: 🟡 Propuesto
+> **Estado**: 🟢 Aceptado
 > **Fecha**: 2026-07-05
-> **Autores**: @Angel, @Fabiola (registro)
-> **Reviewers**: @David (pendiente)
+> **Autores**: @Angel (ahincho), @Fabiola
+> **Reviewers**: @David
 
 ---
 

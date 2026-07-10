@@ -1,0 +1,37 @@
+{
+  "enableSpellcheck": true,
+  "spellcheckLanguages": [
+    "es-PE",
+    "en-US"
+  ],
+  "showInlineTitle": true,
+  "showLineStatusInEditor": true,
+  "showRibbon": true,
+  "alwaysPromptForNewFolderNaming": false,
+  "newLinkFormat": "short",
+  "useMarkdownLinks": false,
+  "showUnsupportedFiles": true,
+  "folderLinkClickBehavior": "open",
+  "showBacklinkInHeader": false,
+  "leftPaneWidth": 280,
+  "rightPaneWidth": 280,
+  "startFolder": "",
+  "expandDefaultFolders": true,
+  "enableAutoPair": true,
+  "enableMatchBrackets": true,
+  "disablePrompts": {
+    "app-restart": false,
+    "migrate-legacy-plugins": false,
+    "sync-conflicts": false,
+    "switch-to-flow-mode": false,
+    "update-obsidian": false
+  },
+  "readableLineLength": true,
+  "vimMode": false,
+  "livePreview": true,
+  "newFileLocation": "current",
+  "attachmentFolderPath": "attachments/",
+  "userDataFolder": "workspace-storage",
+  "alwaysUpdateLinks": false,
+  "showUnsupportedFiles": true
+}
