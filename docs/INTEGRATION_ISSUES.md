@@ -29,6 +29,7 @@ No es una lista de bugs internos de cada repo — eso va en los issues de cada r
 | [INT-008](#int-008) | Frontend ↔ Datos | La UI afirma "datos actualizados a diciembre 2024", sin respaldo | Afirmación pública posiblemente falsa | 🔴 Abierto |
 | [INT-009](#int-009) | Gobernanza ↔ Data pipeline | El `.gitignore` de la org tiene `*.csv` | `git add` ignora en silencio los entregables del pipeline | 🟡 En curso |
 | [INT-010](#int-010) | CI ↔ Testing | Lint y tests del frontend son no-bloqueantes (`\|\| echo`) | "CI verde" no significa que los tests pasen | 🔴 Abierto |
+| [INT-011](#int-011) | Agente ↔ Scoring | La afinidad del agente va en 0–100; la fórmula espera [0,1] | Score inflado ×100 si se combinan sin normalizar | 🔴 Abierto |
 
 ---
 
@@ -125,6 +126,25 @@ Ni el `README.md` ni el `Diccionario de datos.md` del repo `05-data-pipeline` in
 corte del `raw.xlsx`. Es una afirmación pública sobre datos oficiales.
 
 - **Acción**: confirmar la fecha real con @Nikolai antes de publicarla, o retirarla de la UI.
+- **Actualización (2026-07-09)**: @Nikolai confirmará la fecha; el portal de descarga estaba caído.
+  Además, el **MTPE consolidó [Mi Carrera](https://micarrera.trabajo.gob.pe/)** como observatorio
+  oficial, relegando a Ponte en Carrera. La UI atribuye los datos a "Ponte en Carrera", pero la
+  fuente podría estar en transición → revisar atribución y fecha de corte antes de publicar.
+
+## INT-011
+
+**Escala de afinidad: 0–100 en el agente vs [0,1] en la fórmula** · Agente ↔ Scoring · 🔴 Abierto
+
+El tool `calculate_affinity` del agente (`08-deep-agent`, `src/tools/matching.py`) devuelve la
+afinidad en **porcentaje (0–100)** — el `reason` dice literalmente *"{score}% de afinidad"*. La
+fórmula de scoring de 5 factores (`4_reglas-negocio-agente.md` §3.1) trabaja con todas las variables
+en **[0, 1]**.
+
+Si el término de afinidad se combina con `income_norm`, `cost_norm`, etc. sin dividir entre 100, el
+score queda **inflado ×100** respecto a los demás factores y el ranking se distorsiona.
+
+- **Acción**: normalizar la afinidad a [0, 1] en el punto de integración agente ↔ scoring (dividir
+  entre 100, o que el tool ya la devuelva normalizada).
 
 ## INT-009
 
