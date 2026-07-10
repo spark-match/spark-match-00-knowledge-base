@@ -1,81 +1,34 @@
-# CODEOWNERS — Spark Match Knowledge Base
-
-
-# =============================================================================
-# Catch-all: cualquier archivo no listado abajo
-# El team `members` contiene a TODOS los miembros de la org, por lo que
-# cualquier PR auto-solicita review a uno o más miembros del team.
-# =============================================================================
-*                                          @spark-match/members
-
-# =============================================================================
-# Onboarding — material para nuevos miembros
-# Aprobación de product-owners + devops
-# =============================================================================
-/onboarding/                               @spark-match/product-owners @spark-match/devops
-
-# =============================================================================
-# Decisiones cross-team (ADRs organizacionales)
-# Aprobación de product-owners + devops
-# =============================================================================
-/decisions/                                @spark-match/product-owners @spark-match/devops
+# CODEOWNERS - Spark Match Knowledge Base (00)
+#
+# Politica de aprobacion (configurada en branch protection):
+#   - dev:  required_approving_review_count: 1
+#            require_code_owner_reviews: true
+#   - main: required_approving_review_count: 1
+#            require_code_owner_reviews: true
+#            require_last_push_approval: true
+#
+# CODE OWNER del repo (catch-all): @spark-match/tech-leads
+#   Miembros: ahincho, dbarretol
+#
+# Paths criticos (governance): @spark-match/product-owners
+#   - Decisiones arquitectonicas, onboarding, postmortems, docs raiz.
+#   - Miembros: dbarretol, FabiTaparaQuispe, ahincho
+#
+# Nota: el autor del PR no puede aprobar su propio PR, ni siquiera siendo
+# CODE OWNER (regla de GitHub). Por ejemplo, un PR abierto por ahincho
+# necesita la aprobacion de cualquier otro miembro del team.
 
 # =============================================================================
-# Arquitectura — documentos de diseño
-# Aprobación de devops
+# Catch-all: el equipo tecnico del repo es CODE OWNER del codigo
 # =============================================================================
-/architecture/                              @spark-match/devops
+*                                          @spark-match/tech-leads
 
 # =============================================================================
-# Postmortems — análisis de incidentes
-# Aprobación de devops
+# Paths criticos: product-owners revisa governance y docs raiz
 # =============================================================================
-/postmortems/                              @spark-match/devops
-
-# =============================================================================
-# Investigación — papers, spikes, comparativas
-# Aprobación de cualquier miembro del team `members`
-# =============================================================================
-/research/                                 @spark-match/members
-
-# =============================================================================
-# Documentación raíz — archivos sensibles
-# Cambios al README/CONTRIBUTING/INDEX/LICENSE afectan a TODA la org.
-# Aprobación de product-owners.
-# =============================================================================
+/decisions/                                @spark-match/product-owners
+/onboarding/                               @spark-match/product-owners
+/postmortems/                              @spark-match/product-owners
 /README.md                                 @spark-match/product-owners
 /CONTRIBUTING.md                           @spark-match/product-owners
-/INDEX.md                                  @spark-match/product-owners
 /LICENSE                                   @spark-match/product-owners
-
-# =============================================================================
-# Configuración de GitHub — CODEOWNERS, workflows, templates
-# Cambios en CI/CD requieren revisión de devops.
-# =============================================================================
-/.github/                                  @spark-match/devops
-/.github/CODEOWNERS                        @spark-match/devops
-
-# =============================================================================
-# Notas operativas
-# =============================================================================
-# 1. Política de aprobación de PRs: todo PR requiere 1 aprobación de un
-#    CODE OWNER. Para paths gobernados (onboarding, decisions, architecture,
-#    postmortems, root files, .github/), la aprobación debe venir de un
-#    integrante de product-owners o devops (cualquiera de los dos).
-#    Para catch-all y /research/, basta con la aprobación de cualquier
-#    miembro del team `members`.
-#
-# 2. El team `@spark-match/members` es un catch-all que incluye a TODOS
-#    los miembros actuales de la organización. Cuando un PR toca un path
-#    sin owner específico, GitHub asigna reviewers de este team.
-#
-# 3. Para añadir un nuevo miembro a la org, agregarlo también al team
-#    `members` con:
-#      gh api -X PUT orgs/spark-match/teams/members/memberships/<user> -f role=member
-#
-# 4. Para que un CODEOWNER específico tenga efecto, el team (o usuario)
-#    debe tener al menos acceso READ al repositorio.
-#
-# 5. Los CODEOWNERS listados en una sección más específica GANAN sobre
-#    el catch-all (`*`) por la regla de "última coincidencia".
-# =============================================================================
