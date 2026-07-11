@@ -30,6 +30,7 @@ No es una lista de bugs internos de cada repo — eso va en los issues de cada r
 | [INT-009](#int-009) | Gobernanza ↔ Data pipeline | El `.gitignore` de la org tiene `*.csv` | `git add` ignora en silencio los entregables del pipeline | 🟡 En curso |
 | [INT-010](#int-010) | CI ↔ Testing | Lint y tests del frontend son no-bloqueantes (`\|\| echo`) | "CI verde" no significa que los tests pasen | 🔴 Abierto |
 | [INT-011](#int-011) | Agente ↔ Scoring | La afinidad del agente va en 0–100; la fórmula espera [0,1] | Score inflado ×100 si se combinan sin normalizar | 🔴 Abierto |
+| [INT-012](#int-012) | ADR-003 ↔ Infra | El ADR-003 eligió 1 ambiente AWS; la infra implementa 2 (dev+prod) | Doc contradice el código + mayor gasto de créditos AWS | 🔴 Abierto |
 
 ---
 
@@ -190,6 +191,30 @@ Está marcado como temporal y documentado en el PR, pero mientras siga así **"C
 "los tests pasan"** en el frontend. Riesgo de llegar a la demo con la red de seguridad desactivada.
 
 - **Acción**: instalar la dependencia que falta y quitar los `|| echo` antes de la Fase 3 (integración).
+
+---
+
+## INT-012
+
+**El ADR-003 eligió 1 ambiente AWS, pero la infra implementa 2 (dev + prod)** · ADR-003 ↔ Infra · 🔴 Abierto
+
+El **ADR-003** eligió explícitamente **un solo ambiente AWS** (diferenciado por tags), y descartó la
+opción de carpetas `live/dev` + `live/prod` por costo (~$30/mes con 1 ambiente vs. ~$120/mes con 2).
+
+En la reunión del 11-jul el equipo decidió tener **dev + prod**, y los PRs de infra ya lo
+implementan:
+
+- `01-devops` — `feat/terraform-pipelines-n-env-aware`: workflows de Terraform conscientes de N ambientes.
+- `02-infrastructure` — `feat/multi-env-and-n-env-pipelines`: crea `live/dev` + `live/prod` (justo la
+  opción que el ADR-003 había descartado).
+
+El código sigue la decisión nueva, pero el **documento (ADR-003) ahora dice lo contrario**.
+
+- **Acción 1:** actualizar el ADR-003 (o crear un ADR-004) que ratifique los 2 ambientes y revise la
+  estimación de costo.
+- **Acción 2 (créditos AWS):** los créditos de AWS Academy son limitados; 2 ambientes con
+  networking/NAT duplicados consumen más rápido. Confirmar que el ambiente `dev` sea liviano o se
+  apague cuando no se use.
 
 ---
 
