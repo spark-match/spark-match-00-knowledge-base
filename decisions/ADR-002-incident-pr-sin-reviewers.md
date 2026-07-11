@@ -2,11 +2,22 @@
 title: "ADR-002: Incident — PRs mergeados sin CODE OWNER review"
 author: "@ahincho"
 date: 2026-07-05
-tags: [decisions, governance, codeowners, incident]
-audience: [product-owners, devops, members]
+updated: 2026-07-09
+tags:
+  - area/decisions
+  - topic/governance/codeowners
+  - topic/governance/process
+  - status/published
+audience:
+  - product-owners
+  - devops
+  - members
 status: published
+adrNumber: "002"
 related:
-  - REVIEW_PERMISSIONS.md
+  - "[[REVIEW_PERMISSIONS]]"
+  - "[[MOC-decisions]]"
+  - "[[MOC-postmortems]]"
 ---
 
 # ADR-002: Incident — PRs mergeados sin CODE OWNER review

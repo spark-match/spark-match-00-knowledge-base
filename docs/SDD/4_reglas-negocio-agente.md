@@ -1,3 +1,25 @@
+---
+title: "Reglas de negocio del agente y motor de scoring"
+author: "@FabiTaparaQuispe"
+date: 2026-07-05
+updated: 2026-07-09
+tags:
+  - area/architecture
+  - topic/ai/agent
+  - topic/ai/scoring
+  - status/draft
+audience:
+  - ai-devs
+  - backend-devs
+  - data-engineers
+status: draft
+related:
+  - "[[MOC-architecture]]"
+  - "[[MOC-decisions]]"
+  - "[[docs/SDD/2_requirements]]"
+  - "[[docs/SDD/3_design]]"
+---
+
 # reglas-negocio-agente.md
 
 > **Status**: 🟡 draft 

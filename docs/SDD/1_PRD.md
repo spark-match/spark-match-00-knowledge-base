@@ -1,3 +1,24 @@
+---
+title: "CareerMatch Perú — PRD Actualizado v1.1"
+author: "@FabiTaparaQuispe"
+date: 2026-07-04
+updated: 2026-07-09
+tags:
+  - area/architecture
+  - topic/product/requirements
+  - status/draft
+audience:
+  - product-owners
+  - tech-leads
+  - members
+status: draft
+related:
+  - "[[MOC-architecture]]"
+  - "[[docs/SDD/2_requirements]]"
+  - "[[docs/SDD/3_design]]"
+  - "[[docs/SDD/ARCHITECTURE]]"
+---
+
 # CareerMatch Perú — PRD Actualizado v1.1
 
 **Versión:** 1.1  

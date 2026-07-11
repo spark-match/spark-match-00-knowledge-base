@@ -1,12 +1,26 @@
 ---
-title: Setup del entorno de desarrollo
-author: @spark-match/devops
+title: "Setup del entorno de desarrollo"
+author: "@spark-match/devops"
 date: 2026-07-04
-tags: [onboarding, setup, devops, github, aws, git]
-audience: [backend-devs, frontend-devs, ai-devs, devops]
+updated: 2026-07-09
+tags:
+  - area/onboarding
+  - topic/setup/dev-environment
+  - topic/setup/github
+  - status/published
+audience:
+  - backend-devs
+  - frontend-devs
+  - ai-devs
+  - devops
 status: published
 related:
-  - welcome.md
+  - "[[onboarding/welcome]]"
+  - "[[CONTRIBUTING]]"
+  - "[[MOC-guides]]"
+aliases:
+  - "dev-setup"
+  - "Setup entorno desarrollo"
 ---
 
 # 🛠️ Setup del Entorno de Desarrollo

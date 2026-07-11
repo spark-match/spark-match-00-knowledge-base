@@ -1,7 +1,25 @@
+---
+title: "Catálogo de Documentos"
+author: "@spark-match/devops"
+date: 2026-07-09
+updated: 2026-07-09
+tags:
+  - area/conventions
+  - status/published
+audience:
+  - members
+status: published
+aliases:
+  - "INDEX"
+  - "Catálogo"
+  - "Índice de documentos"
+---
+
 # 📑 Índice de Documentos — Knowledge Base
 
-> Catálogo completo de documentos disponibles.
-> **Mantén este archivo actualizado** al añadir/eliminar docs.
+> **Catálogo completo de documentos disponibles.**
+>
+> ⚠️ **LEGACY / MANTENIDO COMO FALLBACK**: si tienes Obsidian instalado, **usa los MOCs** ([[00 - Home]], [[MOC-decisions]], [[MOC-guides]], etc.) que se auto-actualizan con queries Dataview. Este archivo queda como catálogo estático alternativo.
 
 > **Leyenda de status**:
 > - 🟢 `published` — vigente y revisado
@@ -10,13 +28,56 @@
 
 ---
 
+## 🔍 Catálogo auto-generado (Dataview)
+
+### Todos los docs publicados
+
+```dataview
+TABLE
+  file.link as "Documento",
+  author as "Autor",
+  date as "Fecha",
+  audience as "Audiencia"
+FROM ""
+WHERE status = "published" AND file.name != this.file.name
+SORT tags ASC, date DESC
+```
+
+### Docs por área
+
+```dataview
+TABLE length(rows) as "Total"
+FROM ""
+WHERE status = "published" AND file.name != this.file.name
+GROUP BY tags
+```
+
+### Docs por audiencia
+
+```dataview
+TABLE length(rows) as "Total"
+FROM ""
+WHERE status = "published"
+GROUP BY audience
+```
+
+---
+
 ## 📖 Guías (`guides/`)
 
 How-tos, tutoriales paso a paso, procedimientos operativos.
 
-| Documento | Autor | Fecha | Audiencia | Status |
-|---|---|---|---|---|
-| _(vacío — añade el primero)_ | — | — | — | — |
+```dataview
+TABLE
+  author as "Autor",
+  date as "Fecha",
+  status as "Status"
+FROM "guides"
+WHERE contains(tags, "area/guides") AND tags != "moc"
+SORT date DESC
+```
+
+> 📌 Ver [[MOC-guides]] para una lista visual.
 
 ---
 
@@ -24,9 +85,17 @@ How-tos, tutoriales paso a paso, procedimientos operativos.
 
 Documentos de diseño, diagramas, decisiones técnicas profundas.
 
-| Documento | Autor | Fecha | Audiencia | Status |
-|---|---|---|---|---|
-| _(vacío — añade el primero)_ | — | — | — | — |
+```dataview
+TABLE
+  author as "Autor",
+  date as "Fecha",
+  status as "Status"
+FROM "architecture"
+WHERE contains(tags, "area/architecture") AND tags != "moc"
+SORT date DESC
+```
+
+> 📌 Ver [[MOC-architecture]].
 
 ---
 
@@ -34,9 +103,17 @@ Documentos de diseño, diagramas, decisiones técnicas profundas.
 
 ADRs (Architecture Decision Records) cross-team. Decisiones que afectan a toda la organización.
 
-| Documento | Autor | Fecha | Audiencia | Status |
-|---|---|---|---|---|
-| [ADR-001: Backend híbrido (Lambda + servidor agente)](./decisions/ADR-001-backend-hibrido-lambda-mas-agente.md) | @Angel, @Fabiola | 2026-07-05 | Backend, AI Devs | 🟡 |
+```dataview
+TABLE
+  author as "Autor",
+  date as "Fecha",
+  status as "Status"
+FROM "decisions"
+WHERE contains(tags, "area/decisions") AND tags != "moc"
+SORT date DESC
+```
+
+> 📌 Ver [[MOC-decisions]].
 
 ---
 
@@ -44,9 +121,17 @@ ADRs (Architecture Decision Records) cross-team. Decisiones que afectan a toda l
 
 Investigaciones, papers, spikes, prototipos, comparativas.
 
-| Documento | Autor | Fecha | Audiencia | Status |
-|---|---|---|---|---|
-| _(vacío — añade el primero)_ | — | — | — | — |
+```dataview
+TABLE
+  author as "Autor",
+  date as "Fecha",
+  status as "Status"
+FROM "research"
+WHERE contains(tags, "area/research") AND tags != "moc"
+SORT date DESC
+```
+
+> 📌 Ver [[MOC-research]].
 
 ---
 
@@ -54,22 +139,33 @@ Investigaciones, papers, spikes, prototipos, comparativas.
 
 Análisis de incidentes y aprendizaje organizacional.
 
-| Documento | Autor | Fecha | Audiencia | Status |
-|---|---|---|---|---|
-| _(vacío — añade el primero)_ | — | — | — | — |
+```dataview
+TABLE
+  severity as "Severidad",
+  author as "Autor",
+  date as "Fecha"
+FROM "postmortems"
+WHERE contains(tags, "area/postmortems") AND tags != "moc"
+SORT date DESC
+```
+
+> 📌 Ver [[MOC-postmortems]].
 
 ---
 
 ## 📋 Plantillas (`templates/`)
 
-Plantillas reutilizables para crear documentos consistentes.
+Plantillas reutilizables para crear documentos consistentes (formato Templater + YAML frontmatter).
 
-| Documento | Autor | Fecha | Audiencia | Status |
-|---|---|---|---|---|
-| [Plantilla de ADR](./templates/adr.md) | @spark-match/devops | 2026-07-04 | Todos | 🟢 |
-| [Plantilla de Postmortem](./templates/postmortem.md) | @spark-match/devops | 2026-07-04 | DevOps, leads | 🟢 |
-| [Plantilla de Investigación](./templates/research.md) | @spark-match/devops | 2026-07-04 | Todos | 🟢 |
-| [Plantilla de How-to](./templates/how-to.md) | @spark-match/devops | 2026-07-04 | Todos | 🟢 |
+| Plantilla | Para qué | Wiki link |
+|---|---|---|
+| [[templates/adr]] | Decisiones arquitectónicas | [[templates/adr]] |
+| [[templates/how-to]] | Guías paso a paso | [[templates/how-to]] |
+| [[templates/postmortem]] | Análisis de incidentes | [[templates/postmortem]] |
+| [[templates/research]] | Investigaciones y comparativas | [[templates/research]] |
+| [[templates/moc]] | Crear nuevos MOCs | [[templates/moc]] |
+| [[templates/daily]] | Daily notes (opcional) | [[templates/daily]] |
+| [[templates/meeting]] | Notas de reuniones | [[templates/meeting]] |
 
 ---
 
@@ -77,57 +173,104 @@ Plantillas reutilizables para crear documentos consistentes.
 
 Material de bienvenida para nuevos miembros.
 
-| Documento | Autor | Fecha | Audiencia | Status |
-|---|---|---|---|---|
-| [Bienvenida a Spark Match](./onboarding/welcome.md) | @spark-match/product-owners | 2026-07-04 | Nuevos miembros | 🟢 |
-| [Setup del entorno de desarrollo](./onboarding/dev-setup.md) | @spark-match/devops | 2026-07-04 | Nuevos devs | 🟢 |
+```dataview
+TABLE
+  author as "Autor",
+  date as "Fecha"
+FROM "onboarding"
+WHERE contains(tags, "area/onboarding") AND tags != "moc"
+SORT date DESC
+```
+
+> 📌 Ver [[MOC-onboarding]].
 
 ---
 
 ## 🗺️ Mapa por equipo
 
 ### Backend Devs
-- [ADR-001: Backend híbrido (Lambda + servidor agente)](./decisions/ADR-001-backend-hibrido-lambda-mas-agente.md)
-- [Reglas de negocio del agente y scoring](./docs/SDD/4_reglas-negocio-agente.md)
+
+- [[MOC-decisions]] — ADRs de arquitectura
+- [[decisions/ADR-001-backend-hibrido-lambda-mas-agente]]
+- [[docs/SDD/4_reglas-negocio-agente|Reglas de negocio del agente]]
 
 ### Frontend Devs
-- [Reglas de negocio del agente y scoring](./docs/SDD/4_reglas-negocio-agente.md)
+
+- [[docs/SDD/4_reglas-negocio-agente|Reglas de negocio del agente]]
 
 ### AI Devs
-- [Reglas de negocio del agente y scoring](./docs/SDD/4_reglas-negocio-agente.md)
-- [ADR-001: Backend híbrido (Lambda + servidor agente)](./decisions/ADR-001-backend-hibrido-lambda-mas-agente.md)
+
+- [[MOC-decisions]] — ADRs
+- [[decisions/ADR-001-backend-hibrido-lambda-mas-agente]]
+- [[docs/SDD/4_reglas-negocio-agente]]
 
 ### Data Engineers
-- [Reglas de negocio del agente y scoring](./docs/SDD/4_reglas-negocio-agente.md) — §7 esquema de `features.csv`
+
+- [[docs/SDD/4_reglas-negocio-agente|Reglas de negocio del agente]] — §7 esquema de `features.csv`
 
 ### DevOps
-- [Plantilla de ADR](./templates/adr.md)
-- [Plantilla de Postmortem](./templates/postmortem.md)
-- [Plantilla de Investigación](./templates/research.md)
-- [Plantilla de How-to](./templates/how-to.md)
-- [Setup del entorno de desarrollo](./onboarding/dev-setup.md)
+
+- [[MOC-guides]] — How-tos
+- [[onboarding/dev-setup|Setup del entorno de desarrollo]]
+- [[admin/obsidian-conventions|Convenciones del vault]]
 
 ### QA
-- [Reglas de negocio del agente y scoring](./docs/SDD/4_reglas-negocio-agente.md)
+
+- [[docs/SDD/4_reglas-negocio-agente|Reglas de negocio del agente]]
 
 ### Product Owners
-- [Bienvenida a Spark Match](./onboarding/welcome.md)
+
+- [[onboarding/welcome|Bienvenida]]
+- [[MOC-decisions]] — ADRs que requieren aprobación
 
 ### Article Authors
-- _(ningún doc por ahora)_
+
+- _(pendiente añadir docs en [[MOC-research|investigaciones]])_
 
 ---
 
-## 🔍 Búsqueda por tag
+## 📊 Estadísticas del vault
 
-_(se actualizará conforme se añadan docs con front-matter)_
+```dataview
+TABLE
+  length(rows) as "Total"
+FROM ""
+WHERE status = "published" AND file.name != this.file.name
+GROUP BY tags
+SORT length(rows) DESC
+```
 
-## 📊 Estadísticas
+### Por status
 
-- **Documentos totales**: 8 (4 plantillas + 2 onboarding + 1 ADR + 1 SDD reglas)
-- **Documentos por status**:
-  - 🟢 published: 6
-  - 🟡 draft: 2
-  - 🔴 archived: 0
+```dataview
+TABLE length(rows) as "Cantidad"
+FROM ""
+GROUP BY status
+SORT length(rows) DESC
+```
 
-> _Última actualización: 2026-07-05 (ADR-001 + reglas de negocio del agente)_
+### Por autor (top 5)
+
+```dataview
+TABLE length(rows) as "Total docs"
+FROM ""
+WHERE status = "published"
+GROUP BY author
+SORT length(rows) DESC
+LIMIT 5
+```
+
+---
+
+## 🔗 Wikilinks relacionados
+
+- [[00 - Home]]
+- [[README]]
+- [[CONTRIBUTING]]
+- [[admin/obsidian-conventions]]
+- [[admin/frontmatter-schema]]
+- [[admin/dataview-queries]]
+
+---
+
+> _Última actualización: 2026-07-09 — ahora con soporte completo de Dataview_
