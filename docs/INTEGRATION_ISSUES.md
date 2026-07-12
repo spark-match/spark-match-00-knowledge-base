@@ -28,7 +28,7 @@ No es una lista de bugs internos de cada repo — eso va en los issues de cada r
 | [INT-007](#int-007) | Frontend ↔ Prototipo | Scaffold en Angular 21; el prototipo del Figma es Lovable (React) | El código del prototipo no se reutiliza | 🔴 Abierto |
 | [INT-008](#int-008) | Frontend ↔ Datos | La UI afirma "datos actualizados a diciembre 2024", sin respaldo | Afirmación pública posiblemente falsa | 🔴 Abierto |
 | [INT-009](#int-009) | Gobernanza ↔ Data pipeline | El `.gitignore` de la org tiene `*.csv` | `git add` ignora en silencio los entregables del pipeline | 🟡 En curso |
-| [INT-010](#int-010) | CI ↔ Testing | Lint y tests del frontend son no-bloqueantes (`\|\| echo`) | "CI verde" no significa que los tests pasen | 🔴 Abierto |
+| [INT-010](#int-010) | CI ↔ Testing | Checks no bloqueantes: tests del frontend (`\|\| echo`) y checkov de infra (`\|\| true`) | "CI verde" no significa que los checks pasen | 🔴 Abierto |
 | [INT-011](#int-011) | Agente ↔ Scoring | La afinidad del agente va en 0–100; la fórmula espera [0,1] | Score inflado ×100 si se combinan sin normalizar | 🔴 Abierto |
 | [INT-012](#int-012) | ADR-003 ↔ Infra | El ADR-003 eligió 1 ambiente AWS; la infra implementa 2 (dev+prod) | Doc contradice el código + mayor gasto de créditos AWS | 🔴 Abierto |
 
@@ -191,6 +191,15 @@ Está marcado como temporal y documentado en el PR, pero mientras siga así **"C
 "los tests pasan"** en el frontend. Riesgo de llegar a la demo con la red de seguridad desactivada.
 
 - **Acción**: instalar la dependencia que falta y quitar los `|| echo` antes de la Fase 3 (integración).
+
+**Mismo patrón en infra (`02-infrastructure`, PR #16):** el escaneo de seguridad **checkov** corre con
+`|| true` (soft-fail), así que **no bloquea el merge**; los hallazgos se suben a la pestaña *Security*
+de GitHub pero nadie está obligado a resolverlos. Además, **tflint** corre solo como *pre-commit*
+(local), no en el CI del servidor. Es una decisión válida para empezar, pero **"tener checkov" ≠
+"checkov en verde"**.
+
+- **Acción (infra)**: revisar una vez los hallazgos de checkov en la pestaña *Security*, anotar reales
+  vs. falsos positivos (da material para el informe), y evaluar mover tflint al CI.
 
 ---
 
