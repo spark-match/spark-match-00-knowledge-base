@@ -31,6 +31,7 @@ No es una lista de bugs internos de cada repo — eso va en los issues de cada r
 | [INT-010](#int-010) | CI ↔ Testing | Checks no bloqueantes: tests del frontend (`\|\| echo`) y checkov de infra (`\|\| true`) | "CI verde" no significa que los checks pasen | 🔴 Abierto |
 | [INT-011](#int-011) | Agente ↔ Scoring | La afinidad del agente va en 0–100; la fórmula espera [0,1] | Score inflado ×100 si se combinan sin normalizar | 🔴 Abierto |
 | [INT-012](#int-012) | ADR-003 ↔ Infra | El ADR-003 eligió 1 ambiente AWS; la infra implementa 2 (dev+prod) | Costos ✅ mitigados (PR #23); falta actualizar el ADR | 🟡 En curso |
+| [INT-013](#int-013) | Vector DB ↔ docs | ADR-008 descarta pgvector; el vector store queda "por definir" | Status, reglas de negocio e informe dicen pgvector "ratificado" | 🔴 Abierto |
 
 ---
 
@@ -226,6 +227,32 @@ El código sigue la decisión nueva, pero el **documento (ADR-003) ahora dice lo
   con **alertas SNS** al 80% real y 100% proyectado. Los 2 ambientes ya **no** amenazan los créditos.
 
 > **Estado:** la parte de costos quedó resuelta; solo falta la actualización documental del ADR-003.
+
+---
+
+## INT-013
+
+**pgvector descartado; el vector store queda "por definir"** · Vector DB ↔ docs · 🔴 Abierto
+
+El **ADR-008** del backend fue **reconsiderado el 2026-07-13**: Aurora PostgreSQL sigue como BD
+relacional principal, pero **se descarta la extensión `pgvector`**. La búsqueda vectorial (para RAG)
+se hará en un **vector store externo dedicado, aún por definir** (TBD en un ADR futuro).
+
+Esto **desalinea** varios documentos que daban pgvector por cerrado:
+
+- El **status/reparto** presentado dice *"RAG con pgvector / Aurora (ratificado)"*.
+- El doc de reglas de negocio (`4_reglas-negocio-agente.md`, §8) lista Vector DB = **pgvector (Aurora)**.
+- En la reunión del 11-jul se habló de RAG con pgvector como decidido.
+
+Además, como el proveedor de vector store está **TBD**, en la práctica el RAG/vector **vuelve a estar
+abierto** — lo que encaja con la decisión de la reunión de dejar el **RAG fino como trabajo futuro**
+si no alcanza el tiempo.
+
+- **Acción (informe):** no mencionar pgvector como decidido. Redactar: *"lo relacional va en Aurora;
+  la búsqueda vectorial se delega a un vector store externo dedicado (por definir), y para el MVP el
+  RAG queda como trabajo futuro"*.
+- **Acción (docs):** actualizar §8 de reglas de negocio y el status para reflejar el ADR-008
+  reconsiderado.
 
 ---
 
