@@ -30,7 +30,7 @@ No es una lista de bugs internos de cada repo — eso va en los issues de cada r
 | [INT-009](#int-009) | Gobernanza ↔ Data pipeline | El `.gitignore` de la org tiene `*.csv` | `git add` ignora en silencio los entregables del pipeline | 🟡 En curso |
 | [INT-010](#int-010) | CI ↔ Testing | Checks no bloqueantes: tests del frontend (`\|\| echo`) y checkov de infra (`\|\| true`) | "CI verde" no significa que los checks pasen | 🔴 Abierto |
 | [INT-011](#int-011) | Agente ↔ Scoring | La afinidad del agente va en 0–100; la fórmula espera [0,1] | Score inflado ×100 si se combinan sin normalizar | 🔴 Abierto |
-| [INT-012](#int-012) | ADR-003 ↔ Infra | El ADR-003 eligió 1 ambiente AWS; la infra implementa 2 (dev+prod) | Doc contradice el código + mayor gasto de créditos AWS | 🔴 Abierto |
+| [INT-012](#int-012) | ADR-003 ↔ Infra | El ADR-003 eligió 1 ambiente AWS; la infra implementa 2 (dev+prod) | Costos ✅ mitigados (PR #23); falta actualizar el ADR | 🟡 En curso |
 
 ---
 
@@ -219,11 +219,13 @@ implementan:
 
 El código sigue la decisión nueva, pero el **documento (ADR-003) ahora dice lo contrario**.
 
-- **Acción 1:** actualizar el ADR-003 (o crear un ADR-004) que ratifique los 2 ambientes y revise la
-  estimación de costo.
-- **Acción 2 (créditos AWS):** los créditos de AWS Academy son limitados; 2 ambientes con
-  networking/NAT duplicados consumen más rápido. Confirmar que el ambiente `dev` sea liviano o se
-  apague cuando no se use.
+- **Acción 1 (pendiente):** actualizar el ADR-003 (o crear un ADR-004) que ratifique los 2 ambientes
+  y revise la estimación de costo. **Es lo único que queda abierto** — es documental.
+- **Acción 2 (créditos AWS) — ✅ mitigada (PR #23):** el ambiente `dev` quedó **liviano** (NAT apagado
+  = $0, solo endpoint S3 gratis), y se añadió un **AWS Budget** (`spark-match-monthly-total`, $200/mes)
+  con **alertas SNS** al 80% real y 100% proyectado. Los 2 ambientes ya **no** amenazan los créditos.
+
+> **Estado:** la parte de costos quedó resuelta; solo falta la actualización documental del ADR-003.
 
 ---
 
