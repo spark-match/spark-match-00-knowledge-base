@@ -1,7 +1,7 @@
 # Incompatibilidades de integración
 
 > **Artefacto de la tarea I-05** del [plan de trabajo](WORK_PLAN/wp.md).
-> **Responsable**: @Fabiola (testing / integración) · **Última actualización**: 2026-07-09
+> **Responsable**: @Fabiola (testing / integración) · **Última actualización**: 2026-07-19
 
 Registro vivo de los casos donde **dos componentes funcionan bien por separado pero fallan al
 integrarse**: nombres de campo distintos, contratos de API que no coinciden, formatos, rangos de
@@ -19,25 +19,26 @@ No es una lista de bugs internos de cada repo — eso va en los issues de cada r
 
 | ID | Componentes | Problema | Impacto | Estado |
 |---|---|---|---|---|
-| [INT-001](#int-001) | Frontend ↔ Backend | Feedback binario (👍/👎) vs `validation_score` 1–5 | La API rechaza el feedback (HTTP 422) | 🔴 Abierto |
+| [INT-001](#int-001) | Frontend ↔ Backend | Feedback binario (👍/👎) vs `validation_score` 1–5 | Decidido: **UI pasa a Likert 1–5** (reunión 19-jul) | 🟢 Resuelto |
 | [INT-002](#int-002) | Frontend ↔ Datos | La UI usa "Lima Metropolitana"; el dataset solo tiene "Lima" | El filtro de región no devuelve resultados | 🔴 Abierto |
 | [INT-003](#int-003) | Frontend ↔ Reglas de negocio | Los filtros son obligatorios en la UI; las reglas los definen opcionales | El estudiante no puede decir "me da igual" | 🔴 Abierto |
 | [INT-004](#int-004) | Frontend ↔ Backend | El reporte muestra Top-3; el backend devuelve Top-5 | Se pierden 2 recomendaciones | 🔴 Abierto |
 | [INT-005](#int-005) | Datos ↔ Agente | `features.csv` no tiene `riasec_profile` | La afinidad no se puede calcular sobre las 6.208 filas | 🟡 En curso |
 | [INT-006](#int-006) | Backend ↔ tasks.md | Stack real en TypeScript; el `tasks.md` asume Python/FastAPI | Riesgo de retrabajo al repartir tareas | 🔴 Abierto |
-| [INT-007](#int-007) | Frontend ↔ Prototipo | Scaffold en Angular 21; el prototipo del Figma es Lovable (React) | El código del prototipo no se reutiliza | 🔴 Abierto |
-| [INT-008](#int-008) | Frontend ↔ Datos | La UI afirma "datos actualizados a diciembre 2024", sin respaldo | Afirmación pública posiblemente falsa | 🔴 Abierto |
+| [INT-007](#int-007) | Frontend ↔ Prototipo | Scaffold en Angular 21; el prototipo del Figma es Lovable (React) | Decidido: **se va con Angular** (reunión 19-jul) | 🟢 Resuelto |
+| [INT-008](#int-008) | Frontend ↔ Datos | La UI afirma "datos actualizados a diciembre 2024", sin respaldo | Portal Ponte en Carrera **caído**; explorar Mi Carrera + fallback S3 | 🟡 En curso |
 | [INT-009](#int-009) | Gobernanza ↔ Data pipeline | El `.gitignore` de la org tiene `*.csv` | `git add` ignora en silencio los entregables del pipeline | 🟡 En curso |
 | [INT-010](#int-010) | CI ↔ Testing | Checks no bloqueantes: tests del frontend (`\|\| echo`) y checkov de infra (`\|\| true`) | "CI verde" no significa que los checks pasen | 🔴 Abierto |
-| [INT-011](#int-011) | Agente ↔ Scoring | La afinidad del agente va en 0–100; la fórmula espera [0,1] | Score inflado ×100 si se combinan sin normalizar | 🔴 Abierto |
+| [INT-011](#int-011) | Agente ↔ Scoring | La afinidad del agente va en 0–100; la fórmula espera [0,1] | Decidido: **normalizar a [0,1]** en el prompt final (reunión 19-jul) | 🟡 En curso |
 | [INT-012](#int-012) | ADR-003 ↔ Infra | El ADR-003 eligió 1 ambiente AWS; la infra implementa 2 (dev+prod) | Costos ✅ mitigados (PR #23); falta actualizar el ADR | 🟡 En curso |
-| [INT-013](#int-013) | Vector DB ↔ docs | ADR-008 descarta pgvector; el vector store queda "por definir" | Status, reglas de negocio e informe dicen pgvector "ratificado" | 🔴 Abierto |
+| [INT-013](#int-013) | Vector DB ↔ docs | ADR-008 descarta pgvector; el vector store queda "por definir" | Informe ✅ corregido; RAG = trabajo futuro | 🟡 En curso |
+| [INT-014](#int-014) | Data pipeline ↔ Fuente | Portal Ponte en Carrera dado de baja; scraping Selenium falla | Sin datos frescos; se evalúa fallback S3 + Playwright | 🔴 Abierto |
 
 ---
 
 ## INT-001
 
-**Feedback binario en la UI vs escala 1–5 en el backend** · Frontend ↔ Backend · 🔴 Abierto
+**Feedback binario en la UI vs escala 1–5 en el backend** · Frontend ↔ Backend · 🟢 Resuelto
 
 Cada tarjeta del reporte ofrece **"¿Útil? Sí / No"** (binario). Pero el backend define
 `validation_score: int` en el rango **[1, 5]** y **responde HTTP 422** si el valor cae fuera
@@ -45,8 +46,9 @@ Cada tarjeta del reporte ofrece **"¿Útil? Sí / No"** (binario). Pero el backe
 
 Ambos lados funcionan por separado; al integrarse, **todo feedback será rechazado**.
 
-- **Decidir**: ¿la UI pasa a estrellas / escala 1–5, o el backend acepta un booleano?
-- Si se mantiene el binario, hay que cambiar el contrato de la API y su validación.
+- **Decisión (reunión 2026-07-19):** la **UI pasa a escala Likert 1–5** (estrellas), no binario.
+  Además, el feedback se colocará **solo en el mensaje de recomendación final** (idea: un modal
+  emergente, para que no se ignore). → lo implementa @Andy en `04-frontend`.
 
 ## INT-002
 
@@ -107,14 +109,18 @@ cerrarlo antes de repartir tareas.
 
 ## INT-007
 
-**Frontend en Angular; prototipo en Lovable/React** · Frontend ↔ Prototipo · 🔴 Abierto
+**Frontend en Angular; prototipo en Lovable/React** · Frontend ↔ Prototipo · 🟢 Resuelto
 
 El scaffold de `04-frontend` es **Angular 21 + Material + SCSS**. El prototipo validado del diseño
 está hecho en **Lovable**, que genera **React**.
 
 El diseño sigue siendo válido como referencia visual, pero **el código del prototipo no se reutiliza**:
-hay que reimplementar los componentes en Angular. Conviene que el equipo lo asuma explícitamente y no
-lo descubra a mitad de sprint.
+hay que reimplementar los componentes en Angular.
+
+- **Decisión (reunión 2026-07-19):** se **continúa con Angular** (Lovable/React queda solo como
+  referencia visual). @Andy avanzó login/registro, filtros y reportes en local, y subirá el PR
+  aunque aún no esté conectado a la API. Pendiente menor: **cambiar emojis por iconos** (compatibilidad
+  entre navegadores).
 
 ## INT-008
 
@@ -132,10 +138,14 @@ corte del `raw.xlsx`. Es una afirmación pública sobre datos oficiales.
   Además, el **MTPE consolidó [Mi Carrera](https://micarrera.trabajo.gob.pe/)** como observatorio
   oficial, relegando a Ponte en Carrera. La UI atribuye los datos a "Ponte en Carrera", pero la
   fuente podría estar en transición → revisar atribución y fecha de corte antes de publicar.
+- **Actualización (2026-07-19, reunión)**: se confirmó que el portal **Ponte en Carrera está caído /
+  dado de baja** (ver [INT-014](#int-014)). Decisión: **explorar Mi Carrera** (ver si aún expone Excel
+  o pasó a consultas HTML) y, en paralelo, retirar de la UI la afirmación de fecha o ajustarla al
+  snapshot congelado. @Nikolai revisa cuánto cambia el nuevo dataset.
 
 ## INT-011
 
-**Escala de afinidad: 0–100 en el agente vs [0,1] en la fórmula** · Agente ↔ Scoring · 🔴 Abierto
+**Escala de afinidad: 0–100 en el agente vs [0,1] en la fórmula** · Agente ↔ Scoring · 🟡 En curso
 
 El tool `calculate_affinity` del agente (`08-deep-agent`, `src/tools/matching.py`) devuelve la
 afinidad en **porcentaje (0–100)** — el `reason` dice literalmente *"{score}% de afinidad"*. La
@@ -147,6 +157,10 @@ score queda **inflado ×100** respecto a los demás factores y el ranking se dis
 
 - **Acción**: normalizar la afinidad a [0, 1] en el punto de integración agente ↔ scoring (dividir
   entre 100, o que el tool ya la devuelva normalizada).
+- **Decisión (reunión 2026-07-19):** todo debe quedar **normalizado en [0,1]**. Como la afinidad no
+  es una columna del dataset sino que se **deriva de la conversación**, se fijará en el **prompt
+  final** (que aún no está definido). @Nikolai revisará los repos para ubicar dónde cae el 0–100 y
+  quién lo corrige al cerrar el prompt.
 
 ## INT-009
 
@@ -232,7 +246,7 @@ El código sigue la decisión nueva, pero el **documento (ADR-003) ahora dice lo
 
 ## INT-013
 
-**pgvector descartado; el vector store queda "por definir"** · Vector DB ↔ docs · 🔴 Abierto
+**pgvector descartado; el vector store queda "por definir"** · Vector DB ↔ docs · 🟡 En curso
 
 El **ADR-008** del backend fue **reconsiderado el 2026-07-13**: Aurora PostgreSQL sigue como BD
 relacional principal, pero **se descarta la extensión `pgvector`**. La búsqueda vectorial (para RAG)
@@ -253,6 +267,37 @@ si no alcanza el tiempo.
   RAG queda como trabajo futuro"*.
 - **Acción (docs):** actualizar §8 de reglas de negocio y el status para reflejar el ADR-008
   reconsiderado.
+- **Actualización (2026-07-19):** el **informe ya fue corregido** (no menciona pgvector como decidido;
+  Aurora relacional + vector store por definir; RAG = trabajo futuro). En la reunión se confirmó dejar
+  el **RAG como trabajo futuro** si no alcanza el tiempo; @David podría encargarse en la última semana
+  (crear knowledge base + jalar el ARN del recurso). Queda pendiente actualizar §8 de reglas de negocio.
+
+---
+
+## INT-014
+
+**Portal Ponte en Carrera dado de baja; el scraping con Selenium falla** · Data pipeline ↔ Fuente · 🔴 Abierto
+
+Al intentar `dvc repro` en `05-data-pipeline`, la etapa de ingesta **falla**: el scraping con
+**Selenium** ya no encuentra el botón de descarga / devuelve error 500, y el **link directo al Excel
+de Ponte en Carrera (MINEDU) ya no responde**. Se confirmó en la reunión del 19-jul que el portal
+**parece dado de baja** (posible nueva autenticación o migración a [Mi Carrera](https://micarrera.trabajo.gob.pe/)).
+
+Impacto: sin fuente en vivo, el **pipeline de datos no se puede reproducir de punta a punta**, lo que
+resta evidencia para el criterio de evaluación (nos podrían decir que "no hay pipeline, solo un dato
+duro"). Relacionado con [INT-008](#int-008).
+
+- **Decisión / a explorar (reunión 2026-07-19):**
+  - **Fallback a un bucket S3** con el último snapshot: si el scraping falla, el pipeline jala el
+    último `features.csv`/snapshot del bucket. Riesgo: si **siempre** cae al fallback, a nivel de
+    evaluación parece que no hay pipeline → hay que lograr que la ingesta funcione **al menos una vez**
+    y dejarlo documentado.
+  - **Evaluar Playwright en vez de Selenium** (Selenium tiene problemas con el render de JavaScript y
+    con headless en el backend).
+  - **Explorar Mi Carrera**: ver si el nuevo portal aún expone Excel o pasó a consultas HTML/API, y
+    cuánto cambian los nombres/estructura del dataset.
+- **Dueño:** @Nikolai (repo `05-data-pipeline`). **Pendiente:** definir quién sube el snapshot al
+  bucket y cada cuánto, para que el "último dato" no quede desactualizado.
 
 ---
 
