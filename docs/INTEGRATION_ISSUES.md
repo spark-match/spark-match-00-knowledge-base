@@ -1,7 +1,7 @@
 # Incompatibilidades de integración
 
 > **Artefacto de la tarea I-05** del [plan de trabajo](WORK_PLAN/wp.md).
-> **Responsable**: @Fabiola (testing / integración) · **Última actualización**: 2026-07-19
+> **Responsable**: @Fabiola (testing / integración) · **Última actualización**: 2026-07-25
 
 Registro vivo de los casos donde **dos componentes funcionan bien por separado pero fallan al
 integrarse**: nombres de campo distintos, contratos de API que no coinciden, formatos, rangos de
@@ -29,7 +29,7 @@ No es una lista de bugs internos de cada repo — eso va en los issues de cada r
 | [INT-008](#int-008) | Frontend ↔ Datos | La UI afirma "datos actualizados a diciembre 2024", sin respaldo | Portal Ponte en Carrera **caído**; explorar Mi Carrera + fallback S3 | 🟡 En curso |
 | [INT-009](#int-009) | Gobernanza ↔ Data pipeline | El `.gitignore` de la org tiene `*.csv` | `git add` ignora en silencio los entregables del pipeline | 🟡 En curso |
 | [INT-010](#int-010) | CI ↔ Testing | Checks no bloqueantes: tests del frontend (`\|\| echo`) y checkov de infra (`\|\| true`) | "CI verde" no significa que los checks pasen | 🔴 Abierto |
-| [INT-011](#int-011) | Agente ↔ Scoring | La afinidad del agente va en 0–100; la fórmula espera [0,1] | Decidido: **normalizar a [0,1]** en el prompt final (reunión 19-jul) | 🟡 En curso |
+| [INT-011](#int-011) | Agente ↔ Scoring | La afinidad del agente va en 0–100; la fórmula espera [0,1] | ✅ Resuelto en `matching.py` (PR #19 mergeado a main) | 🟢 Resuelto |
 | [INT-012](#int-012) | ADR-003 ↔ Infra | El ADR-003 eligió 1 ambiente AWS; la infra implementa 2 (dev+prod) | Costos ✅ mitigados (PR #23); falta actualizar el ADR | 🟡 En curso |
 | [INT-013](#int-013) | Vector DB ↔ docs | ADR-008 descarta pgvector; el vector store queda "por definir" | Informe ✅ corregido; RAG = trabajo futuro | 🟡 En curso |
 | [INT-014](#int-014) | Data pipeline ↔ Fuente | Portal Ponte en Carrera dado de baja; scraping Selenium falla | Sin datos frescos; se evalúa fallback S3 + Playwright | 🔴 Abierto |
@@ -145,7 +145,7 @@ corte del `raw.xlsx`. Es una afirmación pública sobre datos oficiales.
 
 ## INT-011
 
-**Escala de afinidad: 0–100 en el agente vs [0,1] en la fórmula** · Agente ↔ Scoring · 🟡 En curso
+**Escala de afinidad: 0–100 en el agente vs [0,1] en la fórmula** · Agente ↔ Scoring · 🟢 Resuelto
 
 El tool `calculate_affinity` del agente (`08-deep-agent`, `src/tools/matching.py`) devuelve la
 afinidad en **porcentaje (0–100)** — el `reason` dice literalmente *"{score}% de afinidad"*. La
@@ -161,6 +161,10 @@ score queda **inflado ×100** respecto a los demás factores y el ranking se dis
   es una columna del dataset sino que se **deriva de la conversación**, se fijará en el **prompt
   final** (que aún no está definido). @Nikolai revisará los repos para ubicar dónde cae el 0–100 y
   quién lo corrige al cerrar el prompt.
+- **✅ Resuelto (PR #19, mergeado a main):** @Nikolai corrigió `_riasec_similarity` en
+  `08-deep-agent/src/tools/matching.py` para devolver `round(score / max_possible, 4)` (rango
+  **[0,1]**) en vez de `* 100`; el `reason` ya no muestra el `%`. La afinidad ahora es consistente
+  con la fórmula de scoring. Verificado en QA (punto I-6 del [plan de pruebas](QA_TEST_PLAN.md)).
 
 ## INT-009
 
