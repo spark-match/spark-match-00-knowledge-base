@@ -131,3 +131,4 @@ _(se actualizará conforme se añadan docs con front-matter)_
   - 🔴 archived: 0
 
 > _Última actualización: 2026-07-05 (ADR-001 + reglas de negocio del agente)_
+<!-- canary: ruleset + codeowners validation 20260726 -->
