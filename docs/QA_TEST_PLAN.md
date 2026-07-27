@@ -26,12 +26,12 @@ Cada flecha es un **punto de integración** que se prueba de forma independiente
 | # | Integración | Qué se verifica | Resultado esperado | INT | Estado |
 |---|---|---|---|---|---|
 | I-1 | UI → API | Escala de feedback | El front envía **1–5** (Likert), la API lo acepta (no 422) | INT-001 | ⬜ |
-| I-2 | UI → API | Valor de región | El front envía **"Lima"** (y los 25 dptos), no "Lima Metropolitana" | INT-002 | ⬜ |
+| I-2 | UI → API | Valor de región | El front envía **"Lima"** (y los 25 dptos), no "Lima Metropolitana" | INT-002 | 🟡 datos ✅ / falta front→API |
 | I-3 | UI → API | Filtros | Se puede enviar sin filtros obligatorios ("me da igual") | INT-003 | ⬜ |
 | I-4 | API → Agente | Mensaje del usuario | El agente recibe el texto y responde perfil + pesos | INT-005 | ⬜ |
 | I-5 | Agente → Scoring | Pesos | Los 5 pesos **suman 1** | INT-011 | ⬜ |
-| I-6 | Agente → Scoring | Afinidad | La afinidad llega **normalizada en [0,1]** (no 0–100) | INT-011 | ⬜ |
-| I-7 | Scoring → Datos | Ranking | El Top-N sale de `features.csv` y respeta región y presupuesto | INT-002 | ⬜ |
+| I-6 | Agente → Scoring | Afinidad | La afinidad llega **normalizada en [0,1]** (no 0–100) | INT-011 | ✅ (PR #19 en `matching.py`) |
+| I-7 | Scoring → Datos | Ranking | El Top-N sale de `features.csv` y respeta región y presupuesto | INT-002 | 🟡 datos verificados ✅ / ranking live pendiente |
 | I-8 | Salida → UI | Cantidad | El reporte muestra **Top-5** (no Top-3) | INT-004 | ⬜ |
 | I-9 | Agente → UI | Justificación | La explicación cita **datos reales** del ranking (no inventados) | — | ⬜ |
 | I-10 | Observabilidad | LangSmith | Cada interacción queda **registrada** (mensajes, tokens, herramientas) | — | ⬜ |
@@ -55,8 +55,8 @@ Cada caso simula una conversación completa (multi-turno). Sirven también como 
 
 - **Frontend (rama `feat/screen-designe`):** regiones correctas, feedback 1–5, muestra Top-5, sin emojis.
 - **Contrato de datos:** comparar el JSON que envía el front vs. el que espera la API (detecta I-1..I-3).
-- **Datos:** verificar en `features.csv` que las regiones y columnas (`career`, `career_family`,
-  `*_norm`) existan y que "Lima Metropolitana" NO aparezca.
+- **Datos:** ✅ verificado (25-jul) con el script `qa_check_features.py` del repo `05-data-pipeline`
+  (columnas, 25 regiones sin "Metropolitana", `*_norm` en [0,1], 6208 filas / 554 carreras).
 - **Preparar los 5 guiones** de la sección 4 como dataset de evals.
 
 ## 6. Herramientas
@@ -80,4 +80,5 @@ Cada caso simula una conversación completa (multi-turno). Sirven también como 
 
 | Fecha | Caso probado | Resultado | Notas / bug encontrado |
 |---|---|---|---|
-| | | | |
+| 2026-07-25 | `features.csv` (I-2 datos, I-7 datos): columnas, regiones, normalización, conteos | ✅ PASA | 25 regiones (sin "Metropolitana"), `income/admission/cost/duration_norm` en [0,1], 6208 filas / 554 carreras. Script: `qa_check_features.py`. |
+| 2026-07-25 | I-6 afinidad normalizada [0,1] | ✅ PASA | Verificado en `08-deep-agent/src/tools/matching.py` (PR #19 en main): `_riasec_similarity` devuelve `score/max` en [0,1]. |
