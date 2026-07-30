@@ -1,0 +1,318 @@
+# Incompatibilidades de integración
+
+> **Artefacto de la tarea I-05** del [plan de trabajo](WORK_PLAN/wp.md).
+> **Responsable**: @Fabiola (testing / integración) · **Última actualización**: 2026-07-25
+
+Registro vivo de los casos donde **dos componentes funcionan bien por separado pero fallan al
+integrarse**: nombres de campo distintos, contratos de API que no coinciden, formatos, rangos de
+valores, stacks divergentes, o datos que un lado espera y el otro no produce.
+
+No es una lista de bugs internos de cada repo — eso va en los issues de cada repositorio.
+
+## Cómo usarlo
+
+- Un hallazgo = una entrada, con ID propio (`INT-00X`).
+- **Estado**: `🔴 Abierto` · `🟡 En curso` · `🟢 Resuelto`.
+- Al resolverse, anotar la fecha y cómo se resolvió (no borrar la entrada: la trazabilidad importa).
+
+## Resumen
+
+| ID | Componentes | Problema | Impacto | Estado |
+|---|---|---|---|---|
+| [INT-001](#int-001) | Frontend ↔ Backend | Feedback binario (👍/👎) vs `validation_score` 1–5 | Decidido: **UI pasa a Likert 1–5** (reunión 19-jul) | 🟢 Resuelto |
+| [INT-002](#int-002) | Frontend ↔ Datos | La UI usa "Lima Metropolitana"; el dataset solo tiene "Lima" | El filtro de región no devuelve resultados | 🔴 Abierto |
+| [INT-003](#int-003) | Frontend ↔ Reglas de negocio | Los filtros son obligatorios en la UI; las reglas los definen opcionales | El estudiante no puede decir "me da igual" | 🔴 Abierto |
+| [INT-004](#int-004) | Frontend ↔ Backend | El reporte muestra Top-3; el backend devuelve Top-5 | Se pierden 2 recomendaciones | 🔴 Abierto |
+| [INT-005](#int-005) | Datos ↔ Agente | `features.csv` no tiene `riasec_profile` | La afinidad no se puede calcular sobre las 6.208 filas | 🟡 En curso |
+| [INT-006](#int-006) | Backend ↔ tasks.md | Stack real en TypeScript; el `tasks.md` asume Python/FastAPI | Riesgo de retrabajo al repartir tareas | 🔴 Abierto |
+| [INT-007](#int-007) | Frontend ↔ Prototipo | Scaffold en Angular 21; el prototipo del Figma es Lovable (React) | Decidido: **se va con Angular** (reunión 19-jul) | 🟢 Resuelto |
+| [INT-008](#int-008) | Frontend ↔ Datos | La UI afirma "datos actualizados a diciembre 2024", sin respaldo | Portal Ponte en Carrera **caído**; explorar Mi Carrera + fallback S3 | 🟡 En curso |
+| [INT-009](#int-009) | Gobernanza ↔ Data pipeline | El `.gitignore` de la org tiene `*.csv` | `git add` ignora en silencio los entregables del pipeline | 🟡 En curso |
+| [INT-010](#int-010) | CI ↔ Testing | Checks no bloqueantes: tests del frontend (`\|\| echo`) y checkov de infra (`\|\| true`) | "CI verde" no significa que los checks pasen | 🔴 Abierto |
+| [INT-011](#int-011) | Agente ↔ Scoring | La afinidad del agente va en 0–100; la fórmula espera [0,1] | ✅ Resuelto en `matching.py` (PR #19 mergeado a main) | 🟢 Resuelto |
+| [INT-012](#int-012) | ADR-003 ↔ Infra | El ADR-003 eligió 1 ambiente AWS; la infra implementa 2 (dev+prod) | Costos ✅ mitigados (PR #23); falta actualizar el ADR | 🟡 En curso |
+| [INT-013](#int-013) | Vector DB ↔ docs | ADR-008 descarta pgvector; el vector store queda "por definir" | Informe ✅ corregido; RAG = trabajo futuro | 🟡 En curso |
+| [INT-014](#int-014) | Data pipeline ↔ Fuente | Portal Ponte en Carrera dado de baja; scraping Selenium falla | Sin datos frescos; se evalúa fallback S3 + Playwright | 🔴 Abierto |
+
+---
+
+## INT-001
+
+**Feedback binario en la UI vs escala 1–5 en el backend** · Frontend ↔ Backend · 🟢 Resuelto
+
+Cada tarjeta del reporte ofrece **"¿Útil? Sí / No"** (binario). Pero el backend define
+`validation_score: int` en el rango **[1, 5]** y **responde HTTP 422** si el valor cae fuera
+(`tasks.md` 11.3 y 17.2). El `wp.md` (F-05) pide explícitamente *"Pantalla de feedback (Likert 1–5)"*.
+
+Ambos lados funcionan por separado; al integrarse, **todo feedback será rechazado**.
+
+- **Decisión (reunión 2026-07-19):** la **UI pasa a escala Likert 1–5** (estrellas), no binario.
+  Además, el feedback se colocará **solo en el mensaje de recomendación final** (idea: un modal
+  emergente, para que no se ignore). → lo implementa @Andy en `04-frontend`.
+
+## INT-002
+
+**"Lima Metropolitana" no existe en el dataset** · Frontend ↔ Datos · 🔴 Abierto
+
+La UI muestra `Lima Metropolitana` como región (cabecera del chat y perfil del reporte). La columna
+`location` de `features.csv` tiene **25 departamentos**, y el valor real es **`Lima`** a secas.
+
+Verificado sobre `data/features.csv` (repo `05-data-pipeline`): no existe ninguna región cuyo nombre
+contenga "Metropolitana".
+
+- El filtro por región hace match exacto contra `location` → **devolvería 0 carreras**.
+- **Acción**: usar exactamente los 25 valores del dataset como opciones del desplegable.
+
+## INT-003
+
+**Los filtros son obligatorios en la UI** · Frontend ↔ Reglas de negocio · 🔴 Abierto
+
+La pantalla de filtros bloquea el botón con el mensaje *"Completa los 3 filtros"*. Las reglas de
+negocio (§6.4 de `4_reglas-negocio-agente.md`) dicen que los filtros del Bloque C **descartan
+opciones pero son opcionales**: si el estudiante responde *"me da igual"*, ese filtro no se aplica.
+
+Los filtros de tipo ya tienen su escape ("Ambas" / "Ambos"), pero **región no tiene opción
+"Cualquiera / me da igual"** y además bloquea el avance.
+
+## INT-004
+
+**Top-3 en el reporte vs Top-5 en el backend** · Frontend ↔ Backend · 🔴 Abierto
+
+El reporte anuncia *"Se encontraron 3 carreras con alta compatibilidad"*. El backend trunca a
+**Top-5** (`tasks.md` 10.3: `ranked_list[:5]`), y el `4_reglas-negocio-agente.md` §6.7 define
+`Top-N (default N=5)`.
+
+Hay que fijar **un solo N** y que ambos lados lo respeten.
+
+## INT-005
+
+**`features.csv` no tiene `riasec_profile`** · Datos ↔ Agente · 🟡 En curso
+
+El dataset económico (6.208 filas) no trae la dimensión vocacional, así que el término `afinidad`
+de la fórmula de scoring **no se puede calcular** sobre los datos reales. Hoy la afinidad solo
+existe sobre las 10 carreras hardcodeadas del POC `08-deep-agent`.
+
+- **En curso**: PR `feature/riasec-tagging` en `05-data-pipeline` — etiqueta las 554 carreras
+  únicas vía Bedrock y hace el join a las 6.208 filas.
+
+## INT-006
+
+**El backend real es TypeScript; el `tasks.md` asume Python** · Backend ↔ tasks.md · 🔴 Abierto
+
+El scaffold de `03-backend` es **serverless DDD+EDA en TypeScript** (AWS SAM, Lambda, EventBridge,
+Middy + Zod + Powertools), con el contexto Identity ya funcional. El `tasks.md` fija como
+restricciones transversales **Python + `uv` + FastAPI + boto3 puro**.
+
+El `tasks.md` acotó después su alcance al *Matching Context* (Python), lo que reduce el choque, pero
+**el stack del resto del backend sigue sin estar declarado como fuente de verdad única**. Conviene
+cerrarlo antes de repartir tareas.
+
+## INT-007
+
+**Frontend en Angular; prototipo en Lovable/React** · Frontend ↔ Prototipo · 🟢 Resuelto
+
+El scaffold de `04-frontend` es **Angular 21 + Material + SCSS**. El prototipo validado del diseño
+está hecho en **Lovable**, que genera **React**.
+
+El diseño sigue siendo válido como referencia visual, pero **el código del prototipo no se reutiliza**:
+hay que reimplementar los componentes en Angular.
+
+- **Decisión (reunión 2026-07-19):** se **continúa con Angular** (Lovable/React queda solo como
+  referencia visual). @Andy avanzó login/registro, filtros y reportes en local, y subirá el PR
+  aunque aún no esté conectado a la API. Pendiente menor: **cambiar emojis por iconos** (compatibilidad
+  entre navegadores).
+
+## INT-008
+
+**La UI afirma una fecha de datos sin respaldo** · Frontend ↔ Datos · 🔴 Abierto
+
+La portada afirma que los datos *"provienen de la plataforma oficial Ponte en Carrera del Ministerio
+de Educación del Perú, **actualizados a diciembre 2024**"*, y las tarjetas del reporte citan
+*"Ponte en Carrera 2024"*.
+
+Ni el `README.md` ni el `Diccionario de datos.md` del repo `05-data-pipeline` indican la fecha de
+corte del `raw.xlsx`. Es una afirmación pública sobre datos oficiales.
+
+- **Acción**: confirmar la fecha real con @Nikolai antes de publicarla, o retirarla de la UI.
+- **Actualización (2026-07-09)**: @Nikolai confirmará la fecha; el portal de descarga estaba caído.
+  Además, el **MTPE consolidó [Mi Carrera](https://micarrera.trabajo.gob.pe/)** como observatorio
+  oficial, relegando a Ponte en Carrera. La UI atribuye los datos a "Ponte en Carrera", pero la
+  fuente podría estar en transición → revisar atribución y fecha de corte antes de publicar.
+- **Actualización (2026-07-19, reunión)**: se confirmó que el portal **Ponte en Carrera está caído /
+  dado de baja** (ver [INT-014](#int-014)). Decisión: **explorar Mi Carrera** (ver si aún expone Excel
+  o pasó a consultas HTML) y, en paralelo, retirar de la UI la afirmación de fecha o ajustarla al
+  snapshot congelado. @Nikolai revisa cuánto cambia el nuevo dataset.
+
+## INT-011
+
+**Escala de afinidad: 0–100 en el agente vs [0,1] en la fórmula** · Agente ↔ Scoring · 🟢 Resuelto
+
+El tool `calculate_affinity` del agente (`08-deep-agent`, `src/tools/matching.py`) devuelve la
+afinidad en **porcentaje (0–100)** — el `reason` dice literalmente *"{score}% de afinidad"*. La
+fórmula de scoring de 5 factores (`4_reglas-negocio-agente.md` §3.1) trabaja con todas las variables
+en **[0, 1]**.
+
+Si el término de afinidad se combina con `income_norm`, `cost_norm`, etc. sin dividir entre 100, el
+score queda **inflado ×100** respecto a los demás factores y el ranking se distorsiona.
+
+- **Acción**: normalizar la afinidad a [0, 1] en el punto de integración agente ↔ scoring (dividir
+  entre 100, o que el tool ya la devuelva normalizada).
+- **Decisión (reunión 2026-07-19):** todo debe quedar **normalizado en [0,1]**. Como la afinidad no
+  es una columna del dataset sino que se **deriva de la conversación**, se fijará en el **prompt
+  final** (que aún no está definido). @Nikolai revisará los repos para ubicar dónde cae el 0–100 y
+  quién lo corrige al cerrar el prompt.
+- **✅ Resuelto (PR #19, mergeado a main):** @Nikolai corrigió `_riasec_similarity` en
+  `08-deep-agent/src/tools/matching.py` para devolver `round(score / max_possible, 4)` (rango
+  **[0,1]**) en vez de `* 100`; el `reason` ya no muestra el `%`. La afinidad ahora es consistente
+  con la fórmula de scoring. Verificado en QA (punto I-6 del [plan de pruebas](QA_TEST_PLAN.md)).
+
+## INT-009
+
+**`*.csv` en el `.gitignore` ignora los entregables del pipeline** · Gobernanza ↔ Data pipeline · 🟡 En curso
+
+El `.gitignore` estándar añadido a `05-data-pipeline` incluye la regla **`*.csv`** bajo el comentario
+*"NUNCA commitear data cruda"*. Pero **este repo sí versiona su dataset** (`data/features.csv`,
+`data/filtered.csv`, `snapshots/features/*.csv`).
+
+Los archivos ya trackeados no se pierden, pero **cualquier CSV nuevo se ignora en silencio**.
+Verificado con `git check-ignore`:
+
+```
+.gitignore:119:*.csv    data/riasec_tags.csv
+.gitignore:119:*.csv    data/riasec_validation_sample.csv
+```
+
+Esos dos son justamente los entregables de la tarea **B-04** (las 554 carreras etiquetadas y la
+muestra para revisión humana). Sin excepciones, `git add` los descarta sin avisar.
+
+- Incoherencia adicional: la regla dice "nunca commitear data cruda", pero **`data/raw.xlsx` sí está
+  commiteado** y no se ignora (`.xlsx` no aparece en las reglas).
+- **En curso**: el PR `feature/riasec-tagging` adopta el `.gitignore` de la org y le añade una sección
+  de excepciones (`!data/features.csv`, `!data/riasec_tags.csv`, `!snapshots/**/*.csv`…).
+- **Pendiente**: decidir si la plantilla de la org debe llevar `*.csv` para repos de datos.
+
+## INT-010
+
+**Lint y tests del frontend no pueden fallar el CI** · CI ↔ Testing · 🔴 Abierto
+
+En `04-frontend`, el workflow de CI ejecuta ambos pasos con `|| echo`, así que **siempre terminan en
+verde**, aun cuando fallen:
+
+```yaml
+run: npm run lint || echo "Lint warnings present (non-blocking)"
+run: npm test -- --watch=false --browsers=ChromeHeadlessCI || echo "Tests skipped (browser config pending — non-blocking)"
+```
+
+El propio mensaje sugiere que los tests **ni siquiera se ejecutan**: falta la dependencia
+`@vitest/browser-playwright` para el setup de Angular 21 + Vitest.
+
+Está marcado como temporal y documentado en el PR, pero mientras siga así **"CI verde" no significa
+"los tests pasan"** en el frontend. Riesgo de llegar a la demo con la red de seguridad desactivada.
+
+- **Acción**: instalar la dependencia que falta y quitar los `|| echo` antes de la Fase 3 (integración).
+
+**Mismo patrón en infra (`02-infrastructure`, PR #16):** el escaneo de seguridad **checkov** corre con
+`|| true` (soft-fail), así que **no bloquea el merge**; los hallazgos se suben a la pestaña *Security*
+de GitHub pero nadie está obligado a resolverlos. Además, **tflint** corre solo como *pre-commit*
+(local), no en el CI del servidor. Es una decisión válida para empezar, pero **"tener checkov" ≠
+"checkov en verde"**.
+
+- **Acción (infra)**: revisar una vez los hallazgos de checkov en la pestaña *Security*, anotar reales
+  vs. falsos positivos (da material para el informe), y evaluar mover tflint al CI.
+
+---
+
+## INT-012
+
+**El ADR-003 eligió 1 ambiente AWS, pero la infra implementa 2 (dev + prod)** · ADR-003 ↔ Infra · 🔴 Abierto
+
+El **ADR-003** eligió explícitamente **un solo ambiente AWS** (diferenciado por tags), y descartó la
+opción de carpetas `live/dev` + `live/prod` por costo (~$30/mes con 1 ambiente vs. ~$120/mes con 2).
+
+En la reunión del 11-jul el equipo decidió tener **dev + prod**, y los PRs de infra ya lo
+implementan:
+
+- `01-devops` — `feat/terraform-pipelines-n-env-aware`: workflows de Terraform conscientes de N ambientes.
+- `02-infrastructure` — `feat/multi-env-and-n-env-pipelines`: crea `live/dev` + `live/prod` (justo la
+  opción que el ADR-003 había descartado).
+
+El código sigue la decisión nueva, pero el **documento (ADR-003) ahora dice lo contrario**.
+
+- **Acción 1 (pendiente):** actualizar el ADR-003 (o crear un ADR-004) que ratifique los 2 ambientes
+  y revise la estimación de costo. **Es lo único que queda abierto** — es documental.
+- **Acción 2 (créditos AWS) — ✅ mitigada (PR #23):** el ambiente `dev` quedó **liviano** (NAT apagado
+  = $0, solo endpoint S3 gratis), y se añadió un **AWS Budget** (`spark-match-monthly-total`, $200/mes)
+  con **alertas SNS** al 80% real y 100% proyectado. Los 2 ambientes ya **no** amenazan los créditos.
+
+> **Estado:** la parte de costos quedó resuelta; solo falta la actualización documental del ADR-003.
+
+---
+
+## INT-013
+
+**pgvector descartado; el vector store queda "por definir"** · Vector DB ↔ docs · 🟡 En curso
+
+El **ADR-008** del backend fue **reconsiderado el 2026-07-13**: Aurora PostgreSQL sigue como BD
+relacional principal, pero **se descarta la extensión `pgvector`**. La búsqueda vectorial (para RAG)
+se hará en un **vector store externo dedicado, aún por definir** (TBD en un ADR futuro).
+
+Esto **desalinea** varios documentos que daban pgvector por cerrado:
+
+- El **status/reparto** presentado dice *"RAG con pgvector / Aurora (ratificado)"*.
+- El doc de reglas de negocio (`4_reglas-negocio-agente.md`, §8) lista Vector DB = **pgvector (Aurora)**.
+- En la reunión del 11-jul se habló de RAG con pgvector como decidido.
+
+Además, como el proveedor de vector store está **TBD**, en la práctica el RAG/vector **vuelve a estar
+abierto** — lo que encaja con la decisión de la reunión de dejar el **RAG fino como trabajo futuro**
+si no alcanza el tiempo.
+
+- **Acción (informe):** no mencionar pgvector como decidido. Redactar: *"lo relacional va en Aurora;
+  la búsqueda vectorial se delega a un vector store externo dedicado (por definir), y para el MVP el
+  RAG queda como trabajo futuro"*.
+- **Acción (docs):** actualizar §8 de reglas de negocio y el status para reflejar el ADR-008
+  reconsiderado.
+- **Actualización (2026-07-19):** el **informe ya fue corregido** (no menciona pgvector como decidido;
+  Aurora relacional + vector store por definir; RAG = trabajo futuro). En la reunión se confirmó dejar
+  el **RAG como trabajo futuro** si no alcanza el tiempo; @David podría encargarse en la última semana
+  (crear knowledge base + jalar el ARN del recurso). Queda pendiente actualizar §8 de reglas de negocio.
+
+---
+
+## INT-014
+
+**Portal Ponte en Carrera dado de baja; el scraping con Selenium falla** · Data pipeline ↔ Fuente · 🔴 Abierto
+
+Al intentar `dvc repro` en `05-data-pipeline`, la etapa de ingesta **falla**: el scraping con
+**Selenium** ya no encuentra el botón de descarga / devuelve error 500, y el **link directo al Excel
+de Ponte en Carrera (MINEDU) ya no responde**. Se confirmó en la reunión del 19-jul que el portal
+**parece dado de baja** (posible nueva autenticación o migración a [Mi Carrera](https://micarrera.trabajo.gob.pe/)).
+
+Impacto: sin fuente en vivo, el **pipeline de datos no se puede reproducir de punta a punta**, lo que
+resta evidencia para el criterio de evaluación (nos podrían decir que "no hay pipeline, solo un dato
+duro"). Relacionado con [INT-008](#int-008).
+
+- **Decisión / a explorar (reunión 2026-07-19):**
+  - **Fallback a un bucket S3** con el último snapshot: si el scraping falla, el pipeline jala el
+    último `features.csv`/snapshot del bucket. Riesgo: si **siempre** cae al fallback, a nivel de
+    evaluación parece que no hay pipeline → hay que lograr que la ingesta funcione **al menos una vez**
+    y dejarlo documentado.
+  - **Evaluar Playwright en vez de Selenium** (Selenium tiene problemas con el render de JavaScript y
+    con headless en el backend).
+  - **Explorar Mi Carrera**: ver si el nuevo portal aún expone Excel o pasó a consultas HTML/API, y
+    cuánto cambian los nombres/estructura del dataset.
+- **Dueño:** @Nikolai (repo `05-data-pipeline`). **Pendiente:** definir quién sube el snapshot al
+  bucket y cada cuánto, para que el "último dato" no quede desactualizado.
+
+---
+
+## Desviaciones documentadas (no son incompatibilidades)
+
+Cambios conscientes respecto a `tasks.md`, registrados aquí para que todos estén enterados.
+
+| Origen | Desviación | Motivo |
+|---|---|---|
+| PR `feature/riasec-tagging` (repo 05) | Model ID de Bedrock: `anthropic.claude-opus-4-8` en vez de `anthropic.claude-3-5-sonnet-20241022` | Los IDs actuales de Bedrock no llevan sufijo de fecha; el del `tasks.md` está desactualizado |
+| PR `feature/riasec-tagging` (repo 05) | Cliente `AnthropicBedrockMantle` (SDK de Anthropic) en vez de `boto3` + `invoke_model` | `invoke_model` es el camino legacy; el SDK evita construir el JSON a mano |
+
+> Nota relacionada: la **Batches API no está disponible en Amazon Bedrock**, así que no aplica el
+> descuento del 50% por procesamiento en lote para el etiquetado RIASEC.
