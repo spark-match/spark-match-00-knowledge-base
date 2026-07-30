@@ -2,10 +2,26 @@
 
 > **Architecture Decision Record** — captura el contexto, opciones y consecuencias de una decisión arquitectónica significativa.
 
-> **Estado**: 🟡 Propuesto
-> **Fecha**: 2026-07-05
+> **Estado**: 🔴 ARCHIVADO — *Deprecated 2026-07-29 (PR-#79 en `spark-match-00-knowledge-base`)*
+> **Fecha original**: 2026-07-05
 > **Autores**: @Angel, @Fabiola (registro)
 > **Reviewers**: @David (pendiente)
+>
+> ⚠️ **Esta decisión fue revertida**. El 2026-07-28,
+> `spark-match-03-backend` PR #62
+> ([`chore(repo): remove all Python references from this Node.js/TS-only repo`](https://github.com/spark-match/spark-match-03-backend/pull/62))
+> removió **todas** las referencias a Python del backend.
+>
+> **Estado actual**:
+> - El backend `spark-match-03-backend` es 100% TypeScript / Node.js.
+> - El agente cognitivo vive en un repo separado:
+>   `spark-match-08-deep-agent` (Python + FastAPI + LangGraph + Bedrock).
+> - El "híbrido" se materializa a nivel de **repos**, no de un solo
+>   proceso (Lambda CRUD en un repo, FastAPI agent en otro).
+>
+> **Por qué se conserva este archivo**: contexto histórico de por
+> qué se llegó a la decisión de "Lambda para CRUD + Python para
+> agente" y por qué luego se separó en dos repos.
 
 ---
 
