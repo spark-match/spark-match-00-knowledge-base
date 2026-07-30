@@ -1,22 +1,27 @@
 # CODEOWNERS - Spark Match Knowledge Base (00)
 #
-# Politica de aprobacion (configurada via ruleset):
+# Politica de aprobacion (configurada en branch protection):
 #   - dev:  required_approving_review_count: 1
-#            require_code_owner_review: true
+#            require_code_owner_reviews: true
 #   - main: required_approving_review_count: 1
-#            require_code_owner_review: true
+#            require_code_owner_reviews: true
+#            require_last_push_approval: true
 #
-# CODE OWNER del repo: @spark-match/tech-leads
+# CODE OWNER del repo (catch-all): @spark-match/tech-leads
 #   Miembros: ahincho, dbarretol
 #
 # Paths criticos (governance): @spark-match/product-owners
-#   Miembros: dbarretol, FabiTaparaQuispe, ahincho
+#   - Decisiones arquitectonicas, onboarding, postmortems, docs raiz.
+#   - Miembros: dbarretol, FabiTaparaQuispe, ahincho
 #
-# Convencion:
-#   - Cada path del repo esta listado explicitamente (sin catch-all).
-#   - Si se crea un path nuevo, agregar una linea aqui antes de mergearlo.
-#
-# Nota: el autor del PR no puede aprobar su propio PR.
+# Nota: el autor del PR no puede aprobar su propio PR, ni siquiera siendo
+# CODE OWNER (regla de GitHub). Por ejemplo, un PR abierto por ahincho
+# necesita la aprobacion de cualquier otro miembro del team.
+
+# =============================================================================
+# Catch-all: el equipo tecnico del repo es CODE OWNER del codigo
+# =============================================================================
+*                                          @spark-match/tech-leads
 
 # =============================================================================
 # Paths criticos: product-owners revisa governance y docs raiz
@@ -24,24 +29,6 @@
 /decisions/                                @spark-match/product-owners
 /onboarding/                               @spark-match/product-owners
 /postmortems/                              @spark-match/product-owners
-
-# =============================================================================
-# Documentos de governance: doble ownership (tech-leads + product-owners)
-# =============================================================================
-/README.md                                 @spark-match/tech-leads @spark-match/product-owners
-/CONTRIBUTING.md                           @spark-match/tech-leads @spark-match/product-owners
-/LICENSE                                   @spark-match/tech-leads @spark-match/product-owners
-
-# =============================================================================
-# Otros archivos en raiz: tech-leads gobierna
-# =============================================================================
-/INDEX.md                                  @spark-match/tech-leads
-/REVIEW_PERMISSIONS.md                     @spark-match/tech-leads
-
-# =============================================================================
-# Paths tecnicos: tech-leads gobierna
-# =============================================================================
-/.github/                                  @spark-match/tech-leads
-/docs/                                     @spark-match/tech-leads
-/templates/                                @spark-match/tech-leads
-
+/README.md                                 @spark-match/product-owners
+/CONTRIBUTING.md                           @spark-match/product-owners
+/LICENSE                                   @spark-match/product-owners
