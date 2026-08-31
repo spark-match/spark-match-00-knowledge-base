@@ -1,1254 +1,455 @@
 # ARCHITECTURE.md
 
-## Descripción General de la Arquitectura
-
-CareerMatch Perú es un sistema de recomendación de carreras universitarias que opera como una aplicación web full-stack integrada con procesamiento de datos batch y servicios de inteligencia artificial generativa. La arquitectura está diseñada bajo principios de **modularidad, reproducibilidad, transparencia y degradación controlada**.
-
-El flujo de información sigue este patrón:
-
-1. **Capa de Datos (Data Pipeline)**: Descarga datos oficiales de Ponte en Carrera, aplica limpieza, imputación jerárquica y normalización, generando features reproducibles y versionados.
-
-2. **Capa de Backend (Orquestación + Servicios)**: Recibe consultas de usuarios autenticados, orquesta flujos de interpretación LLM, calcula rankings multi-criterio, persiste feedback histórico.
-
-3. **Capa de Presentación (Frontend Web)**: Interfaz conversacional responsiva que permite al usuario expresar preferencias naturales, visualizar resultados y validar recomendaciones.
-
-4. **Almacenamiento (Base de Datos + Snapshots Versionados)**: Persiste sesiones, rankings, validaciones y metadatos de reproducibilidad para auditoría y análisis futuro.
-
-El sistema enfatiza **determinismo absoluto** en el ranking (mismo input → mismo output siempre), **aislamiento de datos** por usuario/sesión, y **fallback controlado** cuando componentes fallan (RAG no disponible no bloquea ranking, LLM falla utiliza templado, etc.).
+> **Alcance.** Arquitectura de la plataforma completa: frontend, backend, agente,
+> pipeline de datos e infraestructura. Para el detalle interno del backend, ver
+> [`spark-match-03-backend/docs/architecture.md`](https://github.com/spark-match/spark-match-03-backend/blob/main/docs/architecture.md).
+>
+> **Última verificación contra el código: 31 de agosto de 2026**, sobre `main` de
+> los ocho repositorios. Cada afirmación técnica de este documento se contrastó
+> con el código en esa fecha. La sección [Diseño objetivo vs. estado real](#diseño-objetivo-vs-estado-real)
+> recoge lo que está descrito pero no implementado.
 
 ---
 
-## Diagramas de Arquitectura
+## Descripción general
 
-### 1. Diagrama de Componentes Generales
+Spark Match es un copiloto de orientación vocacional. Un estudiante conversa con
+un agente que le hace una evaluación RIASEC, le calcula afinidad contra un
+catálogo real de programas universitarios peruanos y le arma un plan de acción.
 
-Este diagrama muestra todos los módulos principales y cómo se relacionan:
+La plataforma son **cuatro servicios desplegables** más un pipeline de datos por
+lotes, en repositorios separados:
+
+| Pieza | Repositorio | Stack | Cómo se despliega |
+|---|---|---|---|
+| Frontend | `04-frontend` | Angular 20 | S3 + CloudFront |
+| Backend | `03-backend` | TypeScript, Node | AWS Lambda vía SAM |
+| Agente | `07-deep-agent` | Python 3.14 | ECS Fargate ARM64 tras ALB |
+| Infraestructura | `02-infrastructure` | Terraform | 16 módulos, `dev` y `prod` |
+| Pipeline de datos | `05-data-pipeline` | Python, DVC | Por lotes, fuera de AWS |
+
+Dos decisiones dan forma a todo lo demás:
+
+**El backend y el agente son procesos distintos, en lenguajes distintos**
+(ADR-001). El backend es serverless y transaccional: identidad, autorización,
+auditoría, registro de informes. El agente es un proceso largo con estado
+conversacional, que no encaja en el modelo de ejecución de Lambda. El agente
+nunca habla con la base de datos del backend; le habla por HTTP, reenviando el
+JWT del propio estudiante.
+
+**El ranking es determinista y vive fuera del LLM.** El modelo interpreta,
+conversa y explica; el orden de las recomendaciones lo calcula código Python
+puro y auditable. Mismo perfil, mismo catálogo, mismo resultado, siempre.
+
+---
+
+## Vista de componentes
 
 ```mermaid
 graph TB
-    subgraph Client["🖥️ CLIENTE"]
-        BrowserUI["Navegador Web<br/>Frontend HTML+JS"]
-        LocalStorage["Local Storage<br/>(session_token)"]
+    subgraph Cliente["Navegador"]
+        SPA["Angular 20 SPA<br/>chat, evaluación, informes"]
+        LS["localStorage<br/>JWT + perfil"]
+        SPA <--> LS
     end
-    
-    subgraph Network["🌐 RED / HTTP"]
-        HTTP["HTTPS / HTTP<br/>REST API<br/>(port 8000)"]
+
+    subgraph Edge["Borde AWS"]
+        CF["CloudFront<br/>estáticos + TLS"]
+        ALB["Application Load Balancer<br/>internet-facing"]
+        APIGW["API Gateway HTTP v2<br/>+ Lambda Authorizer"]
     end
-    
-    subgraph Backend["⚙️ BACKEND (Python / FastAPI)"]
-        subgraph Auth["🔐 Autenticación"]
-            AuthSvc["Auth_Service<br/>(auth.py)<br/>Genera tokens<br/>Valida sesiones"]
-        end
-        
-        subgraph Orchestration["🎯 Orquestación"]
-            OrchSvc["Orchestration_Layer<br/>(orchestration.py)<br/>Maneja /chat, /feedback<br/>Coordina flujos<br/>Logging/auditoría"]
-        end
-        
-        subgraph Session["📋 Sesión"]
-            SessionMgr["Session_Manager<br/>(session.py)<br/>Contexto conversacional<br/>Historial de turnos<br/>Perfil acumulado"]
-        end
-        
-        subgraph LLMComp["🤖 LLM / Interpretación"]
-            LLMSvc["LLM_Layer<br/>(llm_service.py)<br/>Interpreta preferencias<br/>Genera explicaciones<br/>Pesos dinámicos"]
-            
-            ExternalLLM["Gemini API / OpenAI<br/>(externo)"]
-            LLMSvc -->|"API call"| ExternalLLM
-        end
-        
-        subgraph ScoringComp["📊 Scoring"]
-            ScoringEng["Scoring_Engine<br/>(scoring.py)<br/>Calcula concordancia<br/>Genera ranking<br/>Aplica filtros"]
-        end
-        
-        subgraph AfinityComp["💡 Afinidad"]
-            AffinitySvc["Affinity Calculator<br/>(scoring.py)<br/>Mapeo semántico<br/>O embeddings"]
-            EmbeddingSvc["Embedding_Service<br/>(embedding.py)<br/>Genera embeddings"]
-            ExternalEmbed["OpenAI / Google / HF<br/>(externo)"]
-            EmbeddingSvc -->|"API call"| ExternalEmbed
-        end
-        
-        subgraph RAGComp["📚 RAG Opcional"]
-            RAGMod["RAG_Module<br/>(rag.py)<br/>Consultas sobre<br/>detalles de carrera"]
-            VectorDB["Vector Database<br/>(FAISS/Pinecone/Chroma)<br/>Chunks embeddeados<br/>de PDFs"]
-            RAGMod -->|"búsqueda"| VectorDB
-            RAGMod -->|"generación"| LLMSvc
-        end
-        
-        subgraph Feedback["💾 Feedback"]
-            FeedbackSvc["Feedback_Storage<br/>(feedback.py)<br/>Persiste rankings<br/>Validaciones usuario<br/>Metadatos"]
-        end
+
+    subgraph Backend["Backend — Lambda / TypeScript"]
+        AUTH["Authorizer<br/>verifica JWT HS256"]
+        IDENT["Contexto identity<br/>registro, login, perfil, RBAC"]
+        REPORTS["Endpoints de informes<br/>ADR-019"]
+        AUDIT["audit_log<br/>en la misma transacción"]
     end
-    
-    subgraph DataLayer["🗄️ CAPA DE DATOS"]
-        subgraph DataPipeline["📥 Pipeline de Datos"]
-            Ingestion["Ingestion<br/>(ingestion.py)<br/>Descarga automatizada<br/>de Ponte en Carrera<br/>via Selenium"]
-            
-            Clean["Data Clean<br/>(data_clean.py)<br/>Estandarización<br/>Validación"]
-            
-            FeatureEng["Feature Engineering<br/>(feature_engineering.py)<br/>Imputación jerárquica<br/>Normalización"]
-            
-            Ingestion --> Clean --> FeatureEng
-        end
-        
-        subgraph DataStorage["📂 Almacenamiento Datos"]
-            RawXLSX["data/raw.xlsx<br/>(última descarga)"]
-            FilteredCSV["data/filtered.csv<br/>(limpio)"]
-            FeaturesCSV["data/features.csv<br/>(normalizado)"]
-            ConfigJSON["data/feature_config.json<br/>(config imputación)"]
-            
-            RawXLSX --> FilteredCSV --> FeaturesCSV
-            FeaturesCSV --> ConfigJSON
-        end
-        
-        subgraph Snapshots["🔄 Snapshots Versionados"]
-            RawSnaps["snapshots/raw/<br/>raw_*.xlsx"]
-            FeatSnaps["snapshots/features/<br/>features_*.csv"]
-            ConfigSnaps["snapshots/configs/<br/>feature_config_*.json"]
-        end
-        
-        DataPipeline -->|"produce"| DataStorage
-        DataPipeline -->|"crea"| Snapshots
+
+    subgraph Agente["Agente — ECS Fargate / Python"]
+        API["FastAPI<br/>/ag-ui, /threads, /preferences"]
+        GRAPH["Grafo LangGraph<br/>16 middlewares"]
+        SUB["Subagentes<br/>assessment · matching<br/>planning · report"]
+        TOOLS["Herramientas<br/>catálogo · programas · scoring<br/>informes · búsqueda web"]
+        GRAPH --> SUB --> TOOLS
     end
-    
-    subgraph ExternalData["🌍 DATOS EXTERNOS"]
-        PonteEnCarrera["https://ponte...minedu.gob.pe<br/>Portal Oficial MINEDU<br/>Ponte en Carrera"]
+
+    subgraph Datos["Persistencia"]
+        RDS[("RDS PostgreSQL<br/>usuarios, auditoría, informes")]
+        S3R[("S3<br/>artefactos de informes")]
+        SM["Secrets Manager<br/>+ SSM Parameter Store"]
+        EB["EventBridge<br/>eventos de dominio"]
     end
-    
-    subgraph Database["🗃️ PERSISTENCIA"]
-        FeedbackDB["feedback.db<br/>SQLite / PostgreSQL<br/>Sesiones, rankings,<br/>feedback, validaciones"]
+
+    subgraph Externos["Servicios externos"]
+        BR["AWS Bedrock<br/>Claude"]
+        TV["Tavily<br/>búsqueda web"]
+        LSM["LangSmith<br/>trazas"]
     end
-    
-    %% Flujos principales
-    BrowserUI -->|"HTTP request<br/>+ session_token"| HTTP
-    HTTP --> OrchSvc
-    LocalStorage -.->|"almacena token"| BrowserUI
-    
-    OrchSvc -->|"valida"| AuthSvc
-    OrchSvc -->|"recupera contexto"| SessionMgr
-    OrchSvc -->|"interpreta preferencias"| LLMSvc
-    OrchSvc -->|"calcula afinidad"| AffinitySvc
-    OrchSvc -->|"ranking"| ScoringEng
-    OrchSvc -->|"detalles"| RAGMod
-    OrchSvc -->|"persiste"| FeedbackSvc
-    
-    ScoringEng -->|"carga features"| FeaturesCSV
-    ScoringEng -->|"consulta config"| ConfigJSON
-    
-    FeedbackSvc -->|"guarda"| FeedbackDB
-    
-    Ingestion -->|"descarga"| PonteEnCarrera
-    
-    %% Respuestas
-    OrchSvc -->|"JSON response"| HTTP
-    HTTP -->|"renderiza UI"| BrowserUI
-    
-    %% Estilos
-    classDef client fill:#e1f5ff,stroke:#0277bd,color:#000
-    classDef network fill:#fff3e0,stroke:#e65100,color:#000
-    classDef backend fill:#f3e5f5,stroke:#6a1b9a,color:#000
-    classDef auth fill:#fce4ec,stroke:#c2185b,color:#000
-    classDef data fill:#e8f5e9,stroke:#2e7d32,color:#000
-    classDef external fill:#ffd54f,stroke:#f57f17,color:#000
-    classDef db fill:#eceff1,stroke:#37474f,color:#000
-    
-    class BrowserUI,LocalStorage client
-    class HTTP network
-    class OrchSvc,AuthSvc,SessionMgr,LLMSvc,ScoringEng,AffinitySvc,EmbeddingSvc,RAGMod,FeedbackSvc backend
-    class AuthSvc auth
-    class DataPipeline,DataStorage,Snapshots data
-    class PonteEnCarrera,ExternalLLM,ExternalEmbed external
-    class FeedbackDB,VectorDB db
+
+    SPA -->|"HTTPS"| CF
+    SPA -->|"REST + JWT"| APIGW
+    SPA -->|"SSE, protocolo AG-UI"| ALB
+    APIGW --> AUTH --> IDENT
+    APIGW --> REPORTS
+    IDENT --> AUDIT --> RDS
+    IDENT --> EB
+    REPORTS --> RDS
+    REPORTS --> S3R
+    ALB --> API --> GRAPH
+    API -->|"valida JWT<br/>mismo secreto"| SM
+    GRAPH --> RDS
+    TOOLS -->|"reenvía el JWT<br/>del estudiante"| REPORTS
+    TOOLS --> BR
+    TOOLS --> TV
+    GRAPH -.->|"trazas"| LSM
+    IDENT --> SM
 ```
 
 ---
 
-### 2. Diagrama de Flujo de Datos (Request / Response Completo) #TODO: corregir
+## Flujo de una consulta
 
-Este diagrama muestra el ciclo completo de una consulta desde el usuario hasta respuesta con ranking:
+Desde que el estudiante escribe hasta que ve la recomendación:
 
 ```mermaid
 sequenceDiagram
-    participant User as 👤 Usuario<br/>(Navegador)
-    participant Frontend as 🖥️ Frontend<br/>(HTML+JS)
-    participant API as 📡 API<br/>(FastAPI)
-    participant Auth as 🔐 Auth_Service
-    participant Session as 📋 Session_Manager
-    participant Orchs as 🎯 Orchestration
-    participant LLMServ as 🤖 LLM_Layer
-    participant External as ☁️ APIs Externas<br/>(Gemini/OpenAI)
-    participant Affinity as 💡 Affinity
-    participant Scoring as 📊 Scoring_Engine
-    participant Features as 💾 features.csv
-    participant Feedback as 💾 Feedback_Storage
-    participant DB as 🗃️ feedback.db
+    actor E as Estudiante
+    participant F as Frontend
+    participant A as Agente (FastAPI)
+    participant G as Grafo LangGraph
+    participant T as Herramientas
+    participant B as Bedrock
+    participant BE as Backend
 
-    rect rgb(200, 220, 255)
-        note over User,API: FASE 1: INICIALIZACIÓN
-        User->>Frontend: Accede a URL
-        activate Frontend
-        Frontend->>Frontend: Lee session_token<br/>de localStorage
-        alt Token existe
-            Frontend->>Frontend: Token válido en cliente
-        else Token no existe
-            Frontend->>API: POST /session/create
-            activate API
-            API->>Auth: create_session()
-            activate Auth
-            Auth->>Auth: Genera UUID + token
-            Auth-->>API: {session_id, token}
-            deactivate Auth
-            API-->>Frontend: {session_token}
-            deactivate API
-            Frontend->>Frontend: Guarda en localStorage
-        end
-        deactivate Frontend
+    E->>F: escribe un mensaje
+    F->>A: POST /ag-ui (SSE)<br/>Authorization: Bearer
+    Note over A: require_auth valida el JWT<br/>y comprueba propiedad del hilo
+    A->>A: thread_id = f(user_id, thread)
+    A->>A: presupuesto diario por usuario
+
+    A->>G: invoca el grafo
+    Note over G: middlewares: PII, guardrails,<br/>filtro de contenido, router de intención,<br/>hidratación de perfil
+
+    G->>B: turno del coordinador
+    B-->>G: delega en un subagente
+
+    alt Evaluación
+        G->>T: evaluate_riasec_profile
+        T-->>G: código RIASEC de 3 letras
+    else Recomendación
+        G->>T: recommend_programs
+        Note over T: scoring determinista<br/>sobre programs.csv
+        T-->>G: top-N con desglose por criterio
+    else Informe
+        G->>T: generate_report
+        T->>BE: POST /reports (JWT del estudiante)
+        BE-->>T: fila abierta
+        T->>BE: PUT artefacto en S3, cierra la fila
     end
 
-    rect rgb(200, 255, 220)
-        note over User,Feedback: FASE 2: CONSULTA DEL USUARIO
-        User->>Frontend: Escribe: "Me gustan<br/>matemáticas..."
-        activate Frontend
-        Frontend->>API: POST /chat<br/>{message, metadata}<br/>+ header Authorization
-        deactivate Frontend
-        activate API
-        API->>Orchs: handle_chat()
-        deactivate API
-        activate Orchs
-        
-        Orchs->>Auth: validate_token()
-        activate Auth
-        Auth-->>Orchs: ✓ session_id válido
-        deactivate Auth
-        
-        Orchs->>Session: get_context(session_id)
-        activate Session
-        Session-->>Orchs: SessionContext{histórico, perfil_prev}
-        deactivate Session
-    end
-
-    rect rgb(255, 220, 200)
-        note over LLMServ,External: FASE 3: INTERPRETACIÓN LLM
-        Orchs->>LLMServ: interpret_preferences()
-        activate LLMServ
-        LLMServ->>LLMServ: Prepara system_prompt v1<br/>+ contexto histórico
-        LLMServ->>External: API call<br/>(Gemini/OpenAI)
-        activate External
-        External->>External: Procesa request
-        External-->>LLMServ: JSON response<br/>{interests, weights, confidence}
-        deactivate External
-        LLMServ->>LLMServ: Valida JSON<br/>Verifica pesos
-        alt confidence >= 0.70
-            LLMServ-->>Orchs: InterpretationResult<br/>{...ready_to_rank}
-        else confidence < 0.70
-            LLMServ->>LLMServ: Genera follow-up<br/>conversacional
-            LLMServ-->>Orchs: InterpretationResult<br/>{...needs_info}
-        end
-        deactivate LLMServ
-    end
-
-    alt RAMA A: Información Insuficiente
-        rect rgb(255, 240, 200)
-            note over Orchs,Feedback: FASE 4A: SEGUIMIENTO CONVERSACIONAL
-            Orchs->>Session: update_profile()
-            activate Session
-            Session->>Session: Merge información
-            Session->>Session: Recalcula confidence
-            Session-->>Orchs: OK
-            deactivate Session
-            
-            Orchs->>Feedback: save_ranking_partial()
-            activate Feedback
-            Feedback->>DB: INSERT feedback
-            activate DB
-            DB-->>Feedback: ranking_id
-            deactivate DB
-            Feedback-->>Orchs: ranking_id
-            deactivate Feedback
-            
-            Orchs->>API: ChatResponse<br/>{status: success,<br/>bot_message: follow_up,<br/>requires_follow_up: true}
-            activate API
-            API-->>Frontend: JSON
-            deactivate API
-            activate Frontend
-            Frontend->>Frontend: Renderiza pregunta
-            Frontend->>User: "¿Hay región donde prefieras...?"
-            deactivate Frontend
-            
-            note over User,Feedback: Usuario responde<br/>Vuelve a FASE 2
-        end
-    else RAMA B: Información Suficiente
-        rect rgb(200, 255, 200)
-            note over Affinity,Scoring: FASE 4B: CÁLCULO DE AFINIDAD
-            Orchs->>Affinity: calculate_affinity()
-            activate Affinity
-            Affinity->>Affinity: Mapeo semántico<br/>O embeddings<br/>de intereses vs carreras
-            Affinity-->>Orchs: affinity_scores[0..n]
-            deactivate Affinity
-        end
-
-        rect rgb(200, 230, 255)
-            note over Scoring,Features: FASE 5: MOTOR DE SCORING
-            Orchs->>Scoring: rank_all_careers()
-            activate Scoring
-            Scoring->>Features: Carga features.csv
-            activate Features
-            Features-->>Scoring: DataFrame<br/>{income_score, cost_score,<br/>admission_score, ...}
-            deactivate Features
-            
-            Scoring->>Scoring: Para cada carrera:<br/>concordancia = w1*aff +<br/>w2*income + w3*cost + w4*adm<br/>(fórmula determinística)
-            
-            Scoring->>Scoring: Aplica filtros<br/>(región, presupuesto,<br/>tipo institución)
-            
-            Scoring->>Scoring: Ordena por<br/>concordancia DESC<br/>Selecciona Top-3
-            
-            Scoring-->>Orchs: Top-3 rankings<br/>{career, institution,<br/>scores, datos_verificables}
-            deactivate Scoring
-        end
-
-        rect rgb(255, 230, 200)
-            note over LLMServ,External: FASE 6: GENERACIÓN DE EXPLICACIONES
-            Orchs->>LLMServ: generate_explanation()<br/>(para cada Top-3)
-            activate LLMServ
-            LLMServ->>External: API call<br/>+ datos verificables
-            activate External
-            External-->>LLMServ: Explicación personalizada
-            deactivate External
-            LLMServ-->>Orchs: [expl_1, expl_2, expl_3]
-            deactivate LLMServ
-        end
-
-        rect rgb(230, 200, 255)
-            note over Feedback,DB: FASE 7: PERSISTENCIA DE RANKING
-            Orchs->>Feedback: save_ranking()<br/>{session_id, profile,<br/>weights, ranking, explns}
-            activate Feedback
-            Feedback->>Feedback: Construye FeedbackRecord
-            Feedback->>DB: INSERT
-            activate DB
-            DB-->>Feedback: ranking_id
-            deactivate DB
-            Feedback-->>Orchs: ranking_id
-            deactivate Feedback
-        end
-
-        rect rgb(200, 255, 230)
-            note over Orchs,User: FASE 8: RESPUESTA AL USUARIO
-            Orchs-->>API: ChatResponse<br/>{status: success,<br/>ranking.top_3: [...],<br/>rag_available_for: [...],<br/>ranking_id: ...}
-            activate API
-            API-->>Frontend: JSON
-            deactivate API
-            activate Frontend
-            Frontend->>Frontend: Renderiza Top-3<br/>+ explicaciones<br/>+ botones Likert
-            Frontend->>User: "Top-3 recomendaciones<br/>1. Estadística - UNMSM<br/>..."
-            deactivate Frontend
-        end
-    end
-    deactivate Orchs
-
-    rect rgb(255, 200, 200)
-        note over Frontend,DB: FASE 9: VALIDACIÓN DE USUARIO (FEEDBACK)
-        User->>Frontend: Click: Likert 4/5
-        activate Frontend
-        Frontend->>API: POST /feedback<br/>{ranking_id, score: 4}
-        deactivate Frontend
-        activate API
-        API->>Orchs: handle_feedback()
-        activate Orchs
-        Orchs->>Feedback: update_validation()
-        activate Feedback
-        Feedback->>DB: UPDATE feedback<br/>SET validation_score = 4
-        activate DB
-        DB-->>Feedback: OK
-        deactivate DB
-        Feedback-->>Orchs: OK
-        deactivate Feedback
-        Orchs-->>API: FeedbackResponse<br/>{status: success}
-        deactivate Orchs
-        API-->>Frontend: JSON
-        deactivate API
-        activate Frontend
-        Frontend->>User: "¡Gracias por tu feedback!"
-        deactivate Frontend
-    end
+    G-->>A: eventos AG-UI
+    A-->>F: SSE: mensajes, tool calls, razonamiento
+    F-->>E: se renderiza en streaming
 ```
+
+Lo que importa de este flujo: **el LLM decide *qué* herramienta usar, no *qué*
+carrera recomendar.** Cuando llama a `recommend_programs`, recibe de vuelta un
+ranking ya calculado y su desglose numérico; su trabajo a partir de ahí es
+explicarlo en lenguaje natural, no reordenarlo.
 
 ---
 
-### 3. Diagrama de Flujo de Datos (Data Pipeline) - TODO: Corregir
+## El motor de recomendación
 
-Este diagrama muestra cómo los datos viajan a través del pipeline batch:
+Vive en `07-deep-agent/src/tools/recommendation/scoring.py`. Es código puro, sin
+dependencias del LLM, y por tanto testeable y auditable.
 
-```mermaid
-flowchart TD
-    Start["🟢 Inicio Pipeline<br/>(ejecución diaria)"]
-    
-    Start --> Ingest["📥 INGESTION<br/>(ingestion.py)"]
-    
-    subgraph Ingest_Box["Ingestion"]
-        Ingest_1["1. Selenium abre<br/>navegador Chrome"]
-        Ingest_2["2. Navega a<br/>portal MINEDU"]
-        Ingest_3["3. Ejecuta búsqueda<br/>(clic btnBuscar)"]
-        Ingest_4["4. Descarga Excel<br/>(clic descargarDondeEstudio)"]
-        Ingest_5["5. Espera descarga<br/>máximo 60 seg"]
-        Ingest_6["6. Mueve archivo<br/>a data/raw.xlsx"]
-        Ingest_7["7. Copia snapshot<br/>a snapshots/raw/<br/>raw_YYYYMMDD_HHMMSS.xlsx"]
-        Ingest_1 --> Ingest_2 --> Ingest_3 --> Ingest_4 --> Ingest_5 --> Ingest_6 --> Ingest_7
-    end
-    
-    Ingest_7 --> RawXLSX["💾 data/raw.xlsx<br/>(Dataset crudo)"]
-    Ingest_7 --> RawSnap["💾 snapshots/raw/<br/>raw_*.xlsx<br/>(Histórico versionado)"]
-    
-    RawXLSX --> Clean["🧹 CLEANING<br/>(data_clean.py)"]
-    
-    subgraph Clean_Box["Data Cleaning"]
-        Clean_1["1. Carga Excel<br/>header=6"]
-        Clean_2["2. Renombra columnas<br/>a snake_case<br/>(career_family, career,<br/>institution, ...)"]
-        Clean_3["3. Elimina filas<br/>sin carrera o institución"]
-        Clean_4["4. Convierte tipos<br/>pd.to_numeric<br/>para columnas numéricas"]
-        Clean_5["5. Valida<br/>no hay corrupción"]
-        Clean_6["6. Exporta a CSV<br/>UTF-8-sig"]
-        Clean_1 --> Clean_2 --> Clean_3 --> Clean_4 --> Clean_5 --> Clean_6
-    end
-    
-    Clean_6 --> FilteredCSV["💾 data/filtered.csv<br/>(Dataset limpio)"]
-    
-    FilteredCSV --> FeatEng["⚙️ FEATURE ENGINEERING<br/>(feature_engineering.py)"]
-    
-    subgraph FeatEng_Box["Feature Engineering"]
-        FeatEng_1["1. Crea flags de imputación<br/>(duration_imputed_flag,<br/>income_imputed_flag, ...)"]
-        FeatEng_2["2. Imputación jerárquica<br/>Nivel 1: mediana (family+type)<br/>Nivel 2: mediana (family)<br/>Nivel 3: fallback config"]
-        FeatEng_3["3. Valida rangos<br/>duration: [3,7]<br/>admission: [0,90]<br/>income, cost: >0"]
-        FeatEng_4["4. Normalización Min-Max<br/>income_score = MinMax(log1p(income))<br/>cost_score = 1-MinMax(log1p(cost))<br/>duration_score = 1-MinMax(duration)<br/>admission_score = MinMax(admission)"]
-        FeatEng_5["5. Exporta features.csv<br/>(todas columnas)"]
-        FeatEng_6["6. Guarda feature_config.json<br/>(fallback values usados)"]
-        FeatEng_7["7. Crea snapshots:<br/>features_*.csv<br/>feature_config_*.json"]
-        FeatEng_1 --> FeatEng_2 --> FeatEng_3 --> FeatEng_4 --> FeatEng_5 --> FeatEng_6 --> FeatEng_7
-    end
-    
-    FeatEng_5 --> FeaturesCSV["💾 data/features.csv<br/>(Features normalizadas<br/>[0,1] + flags)"]
-    FeatEng_6 --> ConfigJSON["💾 data/feature_config.json<br/>(Configuración imputación)"]
-    FeatEng_7 --> FeatSnap["💾 snapshots/features/<br/>features_*.csv<br/>(Histórico)"]
-    FeatEng_7 --> ConfigSnap["💾 snapshots/configs/<br/>feature_config_*.json<br/>(Histórico)"]
-    
-    FeaturesCSV --> Ready["🟢 LISTO PARA SCORING<br/>(En memoria en Scoring_Engine)"]
-    ConfigJSON --> Ready
-    
-    RawXLSX --> Lineage["📊 Rastreabilidad"]
-    FilteredCSV --> Lineage
-    FeaturesCSV --> Lineage
-    
-    Lineage --> Determinism["✅ DETERMINISMO<br/>Mismo input (MINEDU)<br/>→ Mismo output (features)<br/>Reproducible con snapshots<br/>en cualquier fecha"]
-    
-    style Ingest_Box fill:#e8f5e9
-    style Clean_Box fill:#e8f5e9
-    style FeatEng_Box fill:#e8f5e9
-    style Ready fill:#c8e6c9
-    style Determinism fill:#a5d6a7
-```
+**Cuatro criterios ponderados:**
+
+| Criterio | Peso | Qué mide |
+|---|---|---|
+| `riasec_affinity` | 0.50 | Similitud entre el perfil del estudiante y el de la carrera |
+| `income` | 0.20 | Ingreso mensual esperado del egresado |
+| `admission_accessibility` | 0.20 | Tasa de admisión — cuán alcanzable es entrar |
+| `affordability` | 0.10 | Costo anual, invertido |
+
+La afinidad RIASEC usa ponderación posicional: la primera letra del código pesa
+más que la tercera, y una coincidencia en la misma posición puntúa por encima de
+una coincidencia desplazada. El puntaje se normaliza **contra el auto-match del
+propio perfil**, no contra una constante: un código degenerado con letras
+repetidas puede puntuar más alto contra sí mismo de lo que una constante fija
+permitiría, y con denominador fijo eso se salía del 100 %.
+
+Los otros tres criterios se normalizan contra **percentiles 5 y 95 del dataset**,
+calculados solo sobre las filas con medición real — se excluyen las imputadas a
+propósito, porque son medianas de familia y comprimen la distribución. Un
+programa sin el dato recibe `NEUTRO` (0.5): ni ayuda ni penaliza.
+
+**La duración no es un criterio.** Aparece en el dataset y en documentación
+anterior, pero no entra en `WEIGHTS`.
 
 ---
 
-### 4. Diagrama de Sesión y Ciclo de Vida del Usuario
-
-Este diagrama muestra cómo una sesión nace, vive y muere:
-
-```mermaid
-stateDiagram-v2
-    [*] --> Start: Usuario accede URL
-    
-    Start --> AuthRequired: ¿Token en localStorage?
-    
-    AuthRequired --> CreateSession: NO
-    CreateSession --> SessionCreated: Llama /session/create<br/>Genera session_id + token<br/>Guarda en localStorage
-    
-    AuthRequired --> SessionActive: SÍ
-    SessionCreated --> SessionActive: token + session_id
-    
-    SessionActive --> ChatLoop: Entra en ciclo<br/>conversacional
-    
-    ChatLoop --> TurnN: Turn N - Usuario envía<br/>mensaje/consulta
-    
-    TurnN --> LLMInterpret: LLM interpreta<br/>+ calcula confidence
-    
-    LLMInterpret --> ConfCheck: ¿confidence >= 0.70?
-    
-    ConfCheck --> NeedInfo: NO (< 0.70)
-    NeedInfo --> FollowUp: Genera pregunta<br/>seguimiento
-    FollowUp --> FollowUpResp: Retorna bot_message<br/>+ requires_follow_up=true
-    FollowUpResp --> UpdateContext: Actualiza perfil<br/>en SessionManager
-    UpdateContext --> ChatLoop
-    
-    ConfCheck --> Ready: SÍ (>= 0.70)
-    Ready --> CalcAffinity: Calcula afinidad<br/>para todas carreras
-    CalcAffinity --> CalcScore: Scoring Engine<br/>genera ranking Top-3
-    CalcScore --> GenExplain: LLM genera<br/>explicaciones
-    GenExplain --> PersistRanking: Persist en<br/>Feedback_Storage
-    PersistRanking --> ReturnRanking: Retorna<br/>ranking_id + Top-3
-    ReturnRanking --> RankingDisplay: Frontend muestra<br/>Top-3 + explicaciones<br/>+ Likert buttons
-    RankingDisplay --> UserValidates: Usuario valida<br/>score Likert 1-5
-    UserValidates --> PersistFeedback: POST /feedback<br/>Actualiza validación
-    PersistFeedback --> FeedbackPersisted: Feedback guardado<br/>en BD
-    FeedbackPersisted --> ContinueOrEnd: ¿Nueva consulta?
-    
-    ContinueOrEnd --> AnotherQuery: SÍ
-    AnotherQuery --> ChatLoop
-    
-    ContinueOrEnd --> EndSession: NO
-    
-    EndSession --> SessionTimeout: Token expira?<br/>O usuario cierra?
-    SessionTimeout --> TokenRevoked: Token revocado<br/>en servidor
-    TokenRevoked --> StorageClear: localStorage limpiado<br/>en cliente
-    StorageClear --> [*]
-    
-    style SessionActive fill:#b3e5fc
-    style ChatLoop fill:#fff9c4
-    style Ready fill:#c8e6c9
-    style FeedbackPersisted fill:#f8bbd0
-    style TokenRevoked fill:#ffccbc
-```
-
----
-
-### 5. Diagrama de Estructura de Datos (Schema)
-
-Este diagrama muestra la relación entre modelos de datos principales:
-
-```mermaid
-classDiagram
-    class SessionContext {
-        +UUID session_id
-        +datetime created_at
-        +datetime last_activity
-        +list~Turn~ conversation_turns
-        +UserProfile user_profile
-        +float confidence_score_0_1
-        +list~str~ missing_info
-        +str dialogue_state
-    }
-    
-    class Turn {
-        +int turn_number
-        +str message
-        +str role_user_or_bot
-        +datetime timestamp
-    }
-    
-    class UserProfile {
-        +list~str~ interests
-        +float salary_priority_0_1
-        +float cost_sensitivity_0_1
-        +float admission_tolerance_0_1
-        +str geographic_preference
-        +str institution_type_preference
-        +float confidence_score_0_1
-    }
-    
-    class InterpretationResult {
-        +list~str~ interests
-        +float salary_priority
-        +float cost_sensitivity
-        +float admission_tolerance
-        +str geographic_preference
-        +str institution_type_preference
-        +list~str~ missing_info
-        +float confidence_score
-        +str suggested_follow_up
-        +dict weights_generated
-    }
-    
-    class RankingItem {
-        +int rank_1_2_3
-        +str career
-        +str institution
-        +float concordancia_score_0_1
-        +ScoreByCriterion scores_by_criterion
-        +VerifiableData verifiable_data
-        +str explanation
-    }
-    
-    class ScoreByCriterion {
-        +float affinity_0_1
-        +float salary_0_1
-        +float cost_0_1
-        +float admission_0_1
-    }
-    
-    class VerifiableData {
-        +float monthly_income
-        +float annual_cost
-        +float admission_rate
-        +int duration_years
-    }
-    
-    class FeedbackRecord {
-        +UUID session_id
-        +UUID ranking_id
-        +datetime timestamp_query
-        +dict user_input
-        +UserProfile profile_interpreted
-        +dict weights_generated
-        +list~RankingItem~ ranking_generated
-        +Validation user_validation
-        +Metadata reproducibility_metadata
-    }
-    
-    class Validation {
-        +int validation_score_1_5
-        +str selected_career
-        +datetime timestamp_validation
-        +str notes
-    }
-    
-    class Metadata {
-        +str dataset_snapshot_id
-        +str config_snapshot_id
-        +str prompt_version
-        +str llm_model_used
-        +datetime timestamp
-    }
-    
-    class Feature {
-        +str career
-        +str institution
-        +float income_score_0_1
-        +float cost_score_0_1
-        +float duration_score_0_1
-        +float admission_score_0_1
-        +dict imputation_flags
-    }
-    
-    SessionContext --> Turn : contiene
-    SessionContext --> UserProfile : contiene
-    InterpretationResult --> UserProfile : produce
-    UserProfile --> RankingItem : junto con features
-    RankingItem --> ScoreByCriterion : contiene
-    RankingItem --> VerifiableData : contiene
-    FeedbackRecord --> RankingItem : agrupa
-    FeedbackRecord --> Validation : contiene
-    FeedbackRecord --> Metadata : contiene
-    Feature --> ScoreByCriterion : normaliza
-```
-
----
-
-### 6. Diagrama de Capas Verticales (Responsabilidades)
-
-Este diagrama muestra la separación vertical de responsabilidades:
+## Pipeline de datos
 
 ```mermaid
 graph LR
-    subgraph Presentation["🎨 CAPA DE PRESENTACIÓN"]
-        HTMLCSSDocs["HTML + CSS"]
-        JSLogic["JavaScript<br/>CareerMatchApp"]
-        UIComp["Componentes UI<br/>(chat, ranking,<br/>feedback)"]
-        
-        HTMLCSSDocs --> JSLogic
-        JSLogic --> UIComp
-    end
-    
-    subgraph APILayer["📡 CAPA DE API"]
-        FastAPIApp["FastAPI App"]
-        Endpoints["Endpoints<br/>/chat, /feedback, /rag"]
-        RequestValidation["Validación<br/>de requests"]
-        ResponseFormat["Formato<br/>de respuestas"]
-        
-        FastAPIApp --> Endpoints
-        Endpoints --> RequestValidation
-        Endpoints --> ResponseFormat
-    end
-    
-    subgraph Orchestration["🎯 CAPA DE ORQUESTACIÓN"]
-        OrchestrationSvc["Orchestration_Layer"]
-        ErrorHandling["Manejo de errores<br/>y fallback"]
-        Logging["Logging<br/>y auditoría"]
-        
-        OrchestrationSvc --> ErrorHandling
-        OrchestrationSvc --> Logging
-    end
-    
-    subgraph Services["⚙️ CAPA DE SERVICIOS"]
-        AuthService["Auth_Service<br/>(Autenticación)"]
-        SessionService["Session_Manager<br/>(Contexto)"]
-        LLMService["LLM_Layer<br/>(Interpretación)"]
-        ScoringService["Scoring_Engine<br/>(Ranking)"]
-        AffinityService["Affinity Calculator<br/>(Afinidad)"]
-        EmbeddingService["Embedding_Service<br/>(Vectores)"]
-        RAGService["RAG_Module<br/>(Detalles)"]
-        FeedbackService["Feedback_Storage<br/>(Persistencia)"]
-    end
-    
-    subgraph Data["📊 CAPA DE DATOS"]
-        FeaturesData["features.csv<br/>(Variables normalizadas)"]
-        ConfigData["feature_config.json<br/>(Config)"]
-        SnapshotsData["snapshots/<br/>(Histórico versionado)"]
-        FeedbackDB["feedback.db<br/>(Sesiones, rankings,<br/>validaciones)"]
-        VectorDB["Vector Database<br/>(RAG)"]
-    end
-    
-    subgraph Pipeline["🔄 CAPA DE PIPELINE"]
-        IngestionJob["Ingestion<br/>(Selenium)"]
-        CleaningJob["Data Clean<br/>(Estandarización)"]
-        FeatureJob["Feature Engineering<br/>(Imputación +<br/>Normalización)"]
-    end
-    
-    subgraph External["🌍 SISTEMAS EXTERNOS"]
-        MINEDUPortal["MINEDU<br/>Ponte en Carrera"]
-        LLMProviders["LLM APIs<br/>(Gemini/OpenAI)"]
-        EmbeddingProviders["Embedding APIs<br/>(OpenAI/Google/HF)"]
-    end
-    
-    %% Relaciones entre capas
-    Presentation -->|"HTTP"| APILayer
-    APILayer -->|"valida token,<br/>delega"| Orchestration
-    Orchestration -->|"coordina"| Services
-    Services -->|"carga/persiste"| Data
-    Pipeline -->|"produce"| Data
-    External -->|"proveedor"| Services
-    MINEDUPortal -->|"fuente de datos"| Pipeline
-    
-    style Presentation fill:#e3f2fd
-    style APILayer fill:#fff3e0
-    style Orchestration fill:#f3e5f5
-    style Services fill:#fce4ec
-    style Data fill:#e8f5e9
-    style Pipeline fill:#e0f2f1
-    style External fill:#fff9c4
+    PEC["Ponte en Carrera<br/>MINEDU"]
+    RAW["raw.xlsx"]
+    CLEAN["filtered.csv"]
+    FEAT["features.csv<br/>6.208 filas"]
+    TAGS["riasec_tags.csv<br/>554 carreras"]
+    PROG["programs.csv<br/>catálogo del agente"]
+
+    PEC -.->|"CONGELADO"| RAW
+    RAW --> CLEAN --> FEAT
+    FEAT -->|"etiquetado con Bedrock"| TAGS
+    FEAT --> PROG
+    TAGS --> PROG
+
+    style PEC stroke-dasharray: 5 5
 ```
+
+Cuatro etapas declaradas en `dvc.yaml`: `ingest`, `clean`, `features`, `riasec`.
+El dataset es carrera × institución: «Ingeniería de Sistemas» aparece decenas de
+veces, una por universidad, con su costo, ingreso esperado, tasa de admisión y
+duración.
+
+**La ingesta está congelada.** MINEDU retiró el portal
+`ponteencarrera.minedu.gob.pe` en julio de 2026 y el upstream devuelve HTTP 500.
+La etapa está marcada `frozen: true` en DVC y el `DataSource` lanza
+`SourceFetchError`. Las etapas siguientes se reproducen contra el `raw.xlsx`
+histórico versionado en git. Cualquier actualización del catálogo requiere una
+fuente nueva; la investigación está en `05-data-pipeline/src/sources/README.md`.
+
+El etiquetado RIASEC lo hace un LLM en Bedrock —el mismo cliente `ChatBedrock`
+que usa el agente, para compartir una sola ruta de autenticación y un solo
+formato de id de modelo—. Cada carrera queda marcada con su procedencia en
+`riasec_source`, de modo que una etiqueta generada nunca se confunde con una
+validada a mano.
 
 ---
 
-### 7. Diagrama de Flujo de Autenticación y Sesión - TODO: corregir
+## Almacenamiento
 
-Este diagrama detalla cómo funciona el sistema de tokens y sesiones:
+| Dato | Dónde | Notas |
+|---|---|---|
+| Usuarios, roles, estado | RDS PostgreSQL, esquema `identity` | Migraciones con `node-pg-migrate` |
+| Auditoría | `identity.audit_log` | Escrita en la **misma transacción** que la mutación |
+| Informes (registro) | RDS, vía backend | El backend es el registro; el agente solo lo consume |
+| Informes (artefactos) | S3, bucket privado | Cifrado, con logs de acceso |
+| Estado conversacional | Checkpointer de LangGraph | Ver perfiles abajo |
+| Memoria de largo plazo | Store de LangGraph | Perfil y preferencias del estudiante |
+| Secretos | Secrets Manager, ARN en SSM | Terraform lee el ARN, **nunca el valor** |
+| Datasets | Git + DVC | `programs.csv` viaja en la imagen del agente |
+
+**Tres perfiles de persistencia** (`src/persistence/factory.py`), elegidos por
+`SPARK_PERSISTENCE_BACKEND`:
+
+- `memory` — todo en RAM. Para tests.
+- `sqlite` — fichero local. **Ni `memory` ni `sqlite` tocan AWS**, para que el
+  evaluador del TFP pueda correr el repositorio sin una cuenta.
+- `postgres` — perfil de producción. Resuelve el DSN por SSM → Secrets Manager.
+  Es el único donde la memoria de largo plazo sobrevive a un reinicio.
+
+Sobre los secretos: Terraform lee el **ARN**, nunca el valor. Si el valor se
+creara con `aws_secretsmanager_secret_version` quedaría en claro dentro del
+tfstate, que vive en S3 con versionado — borrarlo después no serviría, porque
+quedan las versiones anteriores del objeto. El valor lo pone una persona, una
+vez, fuera del pipeline.
+
+---
+
+## Autenticación y autorización
 
 ```mermaid
 sequenceDiagram
-    participant Browser as Navegador<br/>(Cliente)
-    participant Frontend as Frontend<br/>(JavaScript)
-    participant API as API<br/>(FastAPI)
-    participant Auth as Auth_Service
-    participant SessionMgr as Session_Manager
-    participant ServerMemory as Servidor<br/>(En memoria)
+    actor E as Estudiante
+    participant F as Frontend
+    participant GW as API Gateway
+    participant AZ as Authorizer Lambda
+    participant H as Handler
+    participant AG as Agente
 
-    rect rgb(200, 220, 255)
-        note over Browser,Frontend: CREACIÓN DE SESIÓN
-        Browser->>Frontend: Accede a URL
-        Frontend->>Frontend: ¿Token en localStorage?
-        
-        alt Token no existe
-            Frontend->>API: POST /session/create
-            activate API
-            API->>Auth: create_session()
-            activate Auth
-            Auth->>Auth: Genera session_id = UUID v4
-            Auth->>Auth: Genera session_token = 32+ bytes<br/>secrets.token_urlsafe()
-            Auth->>ServerMemory: Almacena token_hash<br/>con expiration_time
-            Auth-->>API: {session_id, session_token}
-            deactivate Auth
-            API-->>Frontend: {session_id, session_token}
-            deactivate API
-            Frontend->>Browser: localStorage.setItem<br/>('session_token', token)
-        else Token existe en localStorage
-            Frontend->>Frontend: Usa token existente
-        end
-    end
+    E->>F: correo + contraseña
+    F->>GW: POST /auth/login
+    GW->>H: (ruta pública)
+    Note over H: scrypt N=16384<br/>comparación en tiempo constante
+    H-->>F: JWT HS256, 24 h
+    F->>F: guarda en localStorage
 
-    rect rgb(220, 255, 220)
-        note over Browser,SessionMgr: VALIDACIÓN EN CADA REQUEST
-        Browser->>Frontend: Usuario envía /chat
-        Frontend->>API: POST /chat<br/>header: Authorization: Bearer {token}
-        activate API
-        API->>Auth: validate_token(token)
-        activate Auth
-        
-        alt Token válido y no expirado
-            Auth->>ServerMemory: Busca token_hash
-            Auth->>Auth: Verifica expiración:<br/>now() < expiration_time
-            Auth-->>API: session_id = "550e..."
-        else Token inválido O expirado
-            Auth-->>API: None (invalid)
-        end
-        deactivate Auth
-        
-        alt Session válida
-            API->>SessionMgr: get_context(session_id)
-            activate SessionMgr
-            SessionMgr-->>API: SessionContext{...}
-            deactivate SessionMgr
-            note over API: Continúa procesamiento<br/>/chat
-        else Session inválida
-            API->>API: Retorna HTTP 401
-            API-->>Frontend: {status: 401, detail: "Unauthorized"}
-            Frontend->>Frontend: Limpia localStorage
-            Frontend->>Browser: Redirige a inicio
-            Browser->>Browser: Debe crear nueva sesión
-        end
-        deactivate API
-    end
+    E->>F: acción autenticada
+    F->>GW: Authorization: Bearer
+    GW->>AZ: invoca al authorizer
+    AZ->>AZ: verifica firma, issuer,<br/>audience y expiración
+    AZ-->>GW: isAuthorized + contexto
+    GW->>H: contexto en el evento
+    Note over H: RBAC en user-service:<br/>una sola capa decide
 
-    rect rgb(255, 220, 200)
-        note over Browser,SessionMgr: REVOCACIÓN Y EXPIRACIÓN
-        par Usuario cierra sesión explícita
-            Browser->>Frontend: Click "Cerrar sesión"
-            Frontend->>API: POST /session/logout<br/>+ session_token
-            activate API
-            API->>Auth: revoke_token(token)
-            activate Auth
-            Auth->>ServerMemory: Marca token revocado
-            Auth-->>API: OK
-            deactivate Auth
-            API-->>Frontend: Éxito
-            deactivate API
-            Frontend->>Browser: localStorage.removeItem('session_token')
-        and Timeout automático (8 horas inactividad)
-            ServerMemory->>Auth: Garbage collection<br/>verifica expirations
-            activate Auth
-            Auth->>ServerMemory: Elimina tokens expirados
-            deactivate Auth
-            note over Auth: En siguiente request<br/>con token expirado:<br/>validate_token() → None
-        end
-    end
-
-    rect rgb(255, 230, 200)
-        note over Frontend,SessionMgr: FLUJO COMPLETO: USUARIO → REQUEST → RESPUESTA
-        note over Frontend: 1. Token en localStorage
-        note over API: 2. Validar token
-        note over SessionMgr: 3. Recuperar/actualizar contexto
-        note over API: 4. Procesar consulta
-        note over SessionMgr: 5. Guardar estado sesión
-        note over API: 6. Retornar respuesta JSON
-        note over Frontend: 7. Renderizar UI
-        note over Browser: 8. Usuario ve resultado
-    end
-
+    E->>F: mensaje al agente
+    F->>AG: Bearer, puesto a mano
+    Note over AG: EventSource no admite cabeceras,<br/>de ahí el fetch manual
+    AG->>AG: require_auth + propiedad del hilo
 ```
+
+Puntos concretos:
+
+- **Contraseñas con scrypt** (N=16384, r=8, p=1), asíncrono para no bloquear el
+  event loop de Lambda, comparación con `timingSafeEqual`. Los parámetros viajan
+  dentro del hash, de modo que subirlos no invalida los existentes.
+- **JWT HS256 con `jose`**, validando emisor y audiencia además de la firma. El
+  secreto mínimo es de 32 bytes, comprobado antes de firmar.
+- **Doble verificación**: el Lambda Authorizer valida antes de que la petición
+  llegue al handler, y `requireAuth` vuelve a comprobar dentro. La segunda existe
+  para invocación directa y desarrollo local.
+- **RBAC en una sola capa.** Toda la autorización vive en `user-service.ts`, no
+  repartida por handlers. La auditoría se escribe dentro de la misma transacción
+  que la mutación: si la operación revierte, el registro también.
+- **El agente valida, no emite.** Lee de SSM el mismo secreto que usa el backend,
+  así que técnicamente podría firmar tokens. No lo hace: eso convertiría un
+  secreto de *validación* en capacidad de *emisión* en dos servicios, y a partir
+  de ahí cualquier fallo del agente sería una suplantación. Reenvía el token que
+  el estudiante ya presentó.
+- **Los hilos tienen dueño.** El `thread_id` real se deriva de
+  `(user_id, thread_id del cliente)`, así que un identificador adivinado no
+  alcanza la conversación de otra persona.
 
 ---
 
-### 8. Diagrama de Decisiones (Branching Logic)
+## Defensas del agente
 
-Este diagrama muestra los puntos clave de decisión en el sistema:
+El grafo lleva **16 middlewares**. Los que no son de fontanería:
 
-```mermaid
-flowchart TD
-    Start["🟢 Request llega<br/>a API"]
-    
-    Start --> Step1{"1. Token válido?"}
-    
-    Step1 -->|NO| Error401["❌ HTTP 401<br/>Unauthorized<br/>Requiere re-auth"]
-    Error401 --> End1["🔴 Fin (Error)"]
-    
-    Step1 -->|SÍ| Step2{"2. ¿Sistema<br/>ready?<br/>(features.csv OK,<br/>BD OK?)"}
-    
-    Step2 -->|NO| Error500["❌ HTTP 500<br/>Service Unavailable"]
-    Error500 --> End2["🔴 Fin (Error)"]
-    
-    Step2 -->|SÍ| Step3{"3. ¿Request<br/>tipo /chat?"}
-    
-    Step3 -->|NO| Step4{"4. ¿Request<br/>tipo /feedback?"}
-    Step4 -->|NO| Step5{"5. ¿Request<br/>tipo /rag?"}
-    
-    Step3 -->|SÍ| LLMInterpret["🤖 Interpreta<br/>preferencias con LLM"]
-    
-    Step4 -->|SÍ| UpdateFeedback["💾 Actualiza validación<br/>en Feedback_Storage"]
-    UpdateFeedback --> ReturnFeedback["✅ Retorna<br/>FeedbackResponse"]
-    ReturnFeedback --> End3["🟢 Fin (OK)"]
-    
-    Step5 -->|SÍ| CheckRAG{"¿Carrera tiene<br/>RAG disponible?"}
-    CheckRAG -->|NO| RAGError["⚠️ status: no_documents<br/>Mensaje amigable"]
-    RAGError --> ReturnRAG["✅ Retorna<br/>RagResponse"]
-    ReturnRAG --> End4["🟢 Fin (OK)"]
-    
-    CheckRAG -->|SÍ| RAGQuery["📚 Ejecuta<br/>query RAG"]
-    RAGQuery --> ReturnRAG
-    
-    Step5 -->|NO| Error400["❌ HTTP 400<br/>Bad Request<br/>Endpoint desconocido"]
-    Error400 --> End5["🔴 Fin (Error)"]
-    
-    LLMInterpret --> CalcConf{"¿confidence<br/>>= 0.70?"}
-    
-    CalcConf -->|NO| CountTurns{"¿Turnos<br/>de seguimiento<br/>< 4?"}
-    
-    CountTurns -->|SÍ| GenFollowUp["💬 Genera pregunta<br/>seguimiento"]
-    GenFollowUp --> ReturnChat1["✅ Retorna<br/>ChatResponse<br/>{requires_follow_up: true}"]
-    ReturnChat1 --> End6["🟢 Fin (OK)"]
-    
-    CountTurns -->|NO| Degrade["⚠️ Graceful degradation:<br/>Fuerza ranking con<br/>información disponible"]
-    Degrade --> CalcAffinity
-    
-    CalcConf -->|SÍ| CalcAffinity["💡 Calcula afinidad<br/>para todas carreras"]
-    
-    CalcAffinity --> CheckAffinity{"¿Afinidad calc<br/>exitosa?"}
-    CheckAffinity -->|NO| FallbackAffinity["⚠️ Fallback:<br/>affinity = 0.5<br/>para todas"]
-    FallbackAffinity --> Scoring
-    
-    CheckAffinity -->|SÍ| Scoring["📊 Scoring_Engine<br/>calcula concordancia<br/>y Top-3"]
-    
-    Scoring --> FilterApply["🔍 Aplica filtros<br/>(región, presupuesto,<br/>tipo institución)"]
-    
-    FilterApply --> GenExplain["🤖 Genera explicaciones<br/>personalizado"]
-    
-    GenExplain --> CheckExplain{"¿LLM falla<br/>generar explicación?"}
-    CheckExplain -->|SÍ| TemplateExplain["⚠️ Fallback:<br/>Explicación templated"]
-    TemplateExplain --> Persist
-    
-    CheckExplain -->|SÍ| Persist["💾 Persiste ranking<br/>en Feedback_Storage"]
-    
-    Persist --> PersistOK{"¿Persistencia<br/>OK?"}
-    
-    PersistOK -->|NO| QueueLocal["⚠️ Fallback:<br/>Queue local en-memoria<br/>Reintentará luego"]
-    QueueLocal --> ReturnChat2
-    
-    PersistOK -->|SÍ| ReturnChat2["✅ Retorna<br/>ChatResponse<br/>{ranking.top_3: [...]}"]
-    ReturnChat2 --> End7["🟢 Fin (OK)"]
-    
-    style Error401 fill:#ffcdd2
-    style Error500 fill:#ffcdd2
-    style Error400 fill:#ffcdd2
-    style RAGError fill:#fff9c4
-    style Degrade fill:#fff9c4
-    style FallbackAffinity fill:#fff9c4
-    style TemplateExplain fill:#fff9c4
-    style QueueLocal fill:#fff9c4
-    style End1 fill:#ffccbc
-    style End2 fill:#ffccbc
-    style End3 fill:#c8e6c9
-    style End4 fill:#c8e6c9
-    style End5 fill:#ffccbc
-    style End6 fill:#c8e6c9
-    style End7 fill:#c8e6c9
-```
+| Middleware | Qué hace |
+|---|---|
+| `PIIRedactionMiddleware` | Redacta datos personales antes de que salgan del proceso |
+| `GuardrailsMiddleware` | Frena salidas fuera de dominio |
+| `ContentFilterMiddleware` | Filtra contenido inapropiado |
+| `MaxTurnsMiddleware` | Corta la conversación al llegar al tope de turnos |
+| `AssessmentOnceMiddleware` | Impide repetir la evaluación dentro de una sesión |
+| `ReportGateMiddleware` | Exige perfil completo antes de emitir un informe |
+| `IntentRouterMiddleware` | Enruta al subagente correcto |
+| `ProfileHydration` / `ProfilePersist` | Carga y guarda el perfil del estudiante |
+
+Además: límite de peticiones por IP, cabeceras de seguridad, y **presupuesto
+diario por usuario** sobre el número de invocaciones.
 
 ---
 
-## Patrones de Diseño y Decisiones Clave
+## Integraciones externas
 
-### 1. Desacoplamiento LLM-Scoring
+**AWS Bedrock** es el único proveedor de LLM. No hay Gemini ni OpenAI en el
+código. El mismo cliente `ChatBedrock` lo usan el agente y el etiquetado RIASEC
+del pipeline.
 
-**Decisión:** El **LLM_Layer** y **Scoring_Engine** son completamente independientes.
+**Tavily** para búsqueda web, con DuckDuckGo como fallback declarado. Conviene
+saber que el fallback **no degrada, se apaga**: en las pruebas del equipo
+DuckDuckGo devolvía cero resultados, no peores. Sin la API key de Tavily,
+cualquier pregunta que dependa de información actual queda sin responder.
 
-**Implicación:**
-- LLM genera pesos dinámicos y explicaciones (componentes conversacionales)
-- Scoring usa pesos para calcular ranking (decisión numérica y determinística)
-- Puedo cambiar proveedor LLM sin afectar scoring
-- Puedo cambiar fórmula de scoring sin cambiar LLM
+**LangSmith** para trazas, opcional y apagado por defecto. Una traza lleva la
+conversación entera, incluido lo que escribe el estudiante: activarlo es una
+decisión con implicaciones de privacidad, no solo de observabilidad.
 
-**Beneficio:** Mayor flexibilidad y testabilidad.
-
----
-
-### 2. Reproducibilidad mediante Snapshots Versionados
-
-**Decisión:** Cada ejecución de pipeline genera snapshots con timestamp.
-
-**Implicación:**
-```
-Ranking generado en timestamp T1
-↓
-Guarda metadatos en FeedbackRecord: snapshot_id = "20260715_143022"
-↓
-Evaluador puede recuperar exactamente features.csv y config usados en T1
-↓
-Puede reproducir ranking manualmente o con código
-```
-
-**Beneficio:** Auditoría completa, debugging, reproducibilidad científica.
+**No hay base de datos vectorial ni RAG** en ninguna parte de la plataforma. El
+conocimiento sobre carreras vive en Markdown con frontmatter y en `programs.csv`,
+y se consulta con herramientas deterministas.
 
 ---
 
-### 3. Aislamiento de Sesión por `session_id`
+## Patrones y decisiones clave
 
-**Decisión:** Cada usuario tiene `session_id` único. Datos no comparten entre sesiones.
+**Desacoplamiento LLM–scoring.** El ranking no pasa por el modelo. Esto es lo que
+hace la recomendación reproducible y defendible: se puede explicar por qué una
+carrera quedó tercera enseñando cuatro números.
 
-**Implicación:**
-- Session_Manager: históricos conversacionales aislados
-- Feedback_Storage: querys filtran automáticamente por session_id
-- SQL schema: session_id en índice primario
+**Degradación controlada.** Sin Tavily, el agente sigue conversando. Sin
+LangSmith, sigue funcionando sin trazas. Sin un dato de costo o ingreso, ese
+criterio pasa a neutro en lugar de descartar el programa.
 
-**Beneficio:** Privacidad garantizada, incluso si alguien accede a servidor físicamente.
+**Eventos de dominio.** El backend publica en EventBridge al confirmar una
+transacción — registro, login, cambio de contraseña, cambio de rol. Hoy nadie los
+consume; existen para que un consumidor futuro no obligue a tocar el contexto de
+identidad.
 
----
+**Reproducibilidad de datos.** DVC declara el grafo de etapas, y los snapshots
+fechados de features y configuración permiten reconstruir qué datos produjeron un
+resultado.
 
-### 4. Degradación Controlada (Graceful Degradation)
-
-**Decisión:** Si un componente falla, sistema intenta continuar con fallback.
-
-**Ejemplos:**
-- LLM falla 3 veces → usar respuesta templated
-- Afinidad calc falla → usar fallback 0.5 para todas carreras
-- RAG no disponible → retornar "detalles no disponibles" sin bloquear ranking
-- DB no disponible → almacenar en queue local, sincronizar cuando DB vuelva
-
-**Beneficio:** Robustez, mejor UX (algo es mejor que nada).
+**Aislamiento por usuario.** Derivación del `thread_id`, comprobación de
+propiedad y presupuesto por usuario. El identificador que manda el cliente es una
+sugerencia, no una credencial.
 
 ---
 
-### 5. Determinismo Absoluto en Ranking
+## Observabilidad
 
-**Decisión:** Mismo input SIEMPRE produce mismo output (mismo orden de Top-3).
-
-**Implementación:**
-- Sin randomness en scoring
-- Desempate alfabético por institution name
-- Mismo dataset (snapshots)
-- Mismo algoritmo (Sin cambios mid-ranking)
-
-**Beneficio:** Testing, debugging, auditoría, reproducibilidad.
-
----
-
-## Flujos de Información Clave
-
-### Flujo 1: Usuarios Nuevos (First-Time)
-
-```
-[Navegador]
-    ↓
-localStorage vacío
-    ↓
-[Frontend] llama /session/create
-    ↓
-[Auth_Service] genera session_id + session_token
-    ↓
-[Frontend] guarda token en localStorage
-    ↓
-[Session_Manager] crea SessionContext nuevo (vacío)
-    ↓
-Usuario lista para escribir consulta
-```
-
-### Flujo 2: Consulta con Información Insuficiente
-
-```
-[Usuario] "Me gustan matemáticas"
-    ↓
-[LLM] interpreta: confidence = 0.45 (faltan región, institución, presupuesto)
-    ↓
-[LLM] genera follow-up: "¿Dónde prefieres estudiar?"
-    ↓
-[Frontend] muestra pregunta
-    ↓
-[Usuario] responde: "Lima"
-    ↓
-[Session_Manager] actualiza perfil (merge)
-    ↓
-[LLM] recalcula: confidence = 0.65 (faltan institución, presupuesto)
-    ↓
-Vuelve a step 2 (máximo 4 turnos)
-    ↓
-Cuando confidence >= 0.70 o se alcanzan 4 turnos: procede a ranking
-```
-
-### Flujo 3: Ranking Determinístico
-
-```
-[Pesos] w = {aff: 0.4, sal: 0.3, costo: 0.2, adm: 0.1}
-[Afinidad] A = [0.85, 0.60, 0.20, ...]
-[Features] F = {income_score: [...], cost_score: [...], ...}
-    ↓
-Para cada carrera i:
-    score[i] = 0.4*A[i] + 0.3*F[income][i] + 0.2*F[cost][i] + 0.1*F[admission][i]
-    ↓
-Ordena score[] DESC
-Desempata: institution ASC
-    ↓
-Top-3 = índices con scores más altos
-    ↓
-¿Mismo input en otra sesión/día?
-→ Mismo ranking, mismo orden
-```
+- **Backend**: AWS Lambda Powertools — logger estructurado y tracer por función.
+  Auditoría de negocio en `identity.audit_log`, separada de los logs de
+  aplicación.
+- **Agente**: logging centralizado y LangSmith opcional. Una traza captura
+  mensajes, llamadas a herramientas, razonamiento y delegación en subagentes.
+- **Infraestructura**: CloudWatch y AWS Budgets con alertas por SNS.
+- **Cadena de suministro**: SBOM, CodeQL, Trivy, gitleaks y firma con cosign en
+  CI.
 
 ---
 
-## Integración con Sistemas Externos
+## Resiliencia
 
-### LLM Providers
+La red **no** es el control de acceso del agente. El ALB es internet-facing a
+propósito, porque el navegador del estudiante no tiene IP de origen fija; la
+autorización la hace el JWT que `/ag-ui` valida. Esa afirmación es hoy cierta:
+conviene mantenerla verificada, porque si el endpoint dejara de validar, la
+postura de red no compensaría.
 
-```
-[Backend] llama LLM_Layer.interpret_preferences()
-    ↓
-[LLM_Layer] construye prompt + contexto
-    ↓
-[LLM_Layer] llama API externa (Gemini / OpenAI)
-    ↓
-[Externa] procesa, retorna JSON
-    ↓
-[LLM_Layer] parsea, valida JSON
-    ↓
-Si inválido (3 intentos):
-    → Loguea error
-    → Usa respuesta templated
-    → Continúa
-    ↓
-Retorna InterpretationResult a Orchestration
-```
+El agente corre en Fargate ARM64. En `dev` las tareas van en subredes públicas
+con IP pública para evitar el coste de un NAT; en `prod`, en subredes privadas
+con salida por NAT. En ambos casos el grupo de seguridad solo admite tráfico
+entrante desde el ALB.
 
-### Embedding Providers
-
-```
-[RAG_Module] llama EmbeddingService.embed(texto)
-    ↓
-[EmbeddingService] selecciona provider (OpenAI / Google / HF local)
-    ↓
-Si API externa:
-    → Llama API
-    → Retorna vector
-    ↓
-Si local (HF):
-    → Usa modelo cargado en memoria
-    → Retorna vector
-    ↓
-RAG_Module usa vector para buscar en VectorDB
-```
-
-### MINEDU Portal
-
-```
-[Data Pipeline] ejecuta cada día
-    ↓
-[Ingestion] abre Selenium
-    ↓
-[Selenium] interactúa con portal MINEDU
-    ↓
-Si cambios en portal HTML:
-    → XPath pueden fallar
-    → Loguea timeout
-    → Mantiene última versión conocida
-    ↓
-Descarga, genera snapshot, continúa
-```
+**Límite conocido:** los contadores de presupuesto de búsqueda web viven en
+memoria del proceso, así que el tope es por réplica y no por flota.
 
 ---
 
-## Monitoreo y Observabilidad
+## Diseño objetivo vs. estado real
 
-### Logging Centralizado
+Esta sección existe porque la versión anterior de este documento describía un
+sistema que nunca se construyó. Lo que sigue está verificado el 31/08/2026.
 
-```
-Cada componente loguea eventos JSON:
-
-{
-  "timestamp": "2026-07-15T14:32:00Z",
-  "level": "INFO",
-  "component": "Orchestration",
-  "session_id": "550e8400-...",
-  "message": "Preferences interpreted",
-  "data": {
-    "confidence_score": 0.85,
-    "weights_generated": {...}
-  }
-}
-
-Destino: stdout (Docker) + archivo local (persistencia)
-```
-
-### Métricas Críticas
-
-```
-[Auth_Service]
-  ├─ tokens_created (incrementa)
-  ├─ tokens_validated (incrementa)
-  ├─ tokens_revoked (incrementa)
-  └─ tokens_expired (incrementa)
-
-[LLM_Layer]
-  ├─ interpret_calls (incrementa)
-  ├─ llm_failures (incrementa)
-  ├─ llm_timeouts (incrementa)
-  └─ average_confidence (media)
-
-[Scoring_Engine]
-  ├─ ranking_calculations (incrementa)
-  ├─ scoring_time_ms (histograma)
-  └─ determinism_violations (0 siempre)
-
-[Feedback_Storage]
-  ├─ rankings_saved (incrementa)
-  ├─ validations_received (incrementa)
-  ├─ db_connection_errors (incrementa)
-  └─ queue_local_size (gauge)
-```
+| Área | Estado |
+|---|---|
+| Frontend, agente, infraestructura | Implementados |
+| Backend — contexto `identity` | Implementado con tests |
+| Backend — otros contextos acotados | **No implementados.** `identity` es el único; los informes son endpoints, no un contexto propio |
+| Motor de scoring | Implementado, **4 criterios** (la duración no pondera) |
+| Catálogo de programas | 6.208 filas carrera × institución, 554 carreras etiquetadas |
+| Ingesta de datos | **Congelada.** MINEDU retiró el portal |
+| Entrenamiento de modelos | **No existe.** No hay MLflow ni W&B; el repositorio que iba a alojarlo se eliminó por estar vacío |
+| RAG / base vectorial | **No existe** y no está planeado |
+| Consumidores de eventos de dominio | **Ninguno.** Los eventos se publican, nadie los lee |
 
 ---
 
-## Seguridad y Privacidad
+## Documentos relacionados
 
-### Flujo de Autenticación Segura
-
-```
-[Cliente] guarda session_token en localStorage (HTTPOnly si posible)
-    ↓
-[Cliente] incluye en header: Authorization: Bearer {token}
-    ↓
-[Servidor] recibe request
-    ↓
-[Auth_Service] valida token:
-  ├─ Existe en almacén?
-  ├─ Expirado?
-  ├─ Hash válido?
-    ↓
-Si NO válido → HTTP 401 → Cliente limpia localStorage
-Si SÍ válido → Retorna session_id → Continúa procesamiento
-```
-
-### Aislamiento de Datos
-
-```
-[Usuario A] hace request (session_id_A)
-    ↓
-[Session_Manager] filtra por session_id_A
-    ↓
-[Feedback_Storage] WHERE session_id = 'A' (siempre)
-    ↓
-[Usuario B] con session_id_B
-    ↓
-Incluso si Usuario B accede DB físicamente:
-  → Schema tiene índice (session_id)
-  → Queries automáticas filtran por session_id
-  → Usuario A datos son inaccesibles
-```
-
-### Logging Seguro
-
-```
-NUNCA loguear:
-  ❌ Tokens completos
-  ❌ API keys
-  ❌ Datos PII (nombres reales de usuarios)
-
-SÍ loguear:
-  ✅ session_id (anónimo)
-  ✅ Timestamps
-  ✅ Nombres de carreras (públicos)
-  ✅ Scores, pesos (no PII)
-```
+- [`03-backend/docs/architecture.md`](https://github.com/spark-match/spark-match-03-backend/blob/main/docs/architecture.md) — interior del backend: contextos acotados, eventos, almacenamiento
+- [`decisions/ADR-001`](../../decisions/ADR-001-backend-hibrido-lambda-mas-agente.md) — por qué backend y agente son procesos separados
+- [`decisions/ADR-003`](../../decisions/ADR-003-branch-based-deployment.md) — despliegue por rama, un solo ambiente AWS
+- [`4_reglas-negocio-agente.md`](4_reglas-negocio-agente.md) — reglas de negocio del agente
+- `02-infrastructure/docs/IAM_ROLES.md` — roles y confianza OIDC
 
 ---
 
-## Resiliencia y Failover
+## Mantener este documento honesto
 
-### Disponibilidad en Demo
+Se desactualizó una vez y el resultado fue un SDD que describía un producto
+distinto del construido. Para que no vuelva a pasar:
 
-```
-Target: Best effort (no SLA)
-
-Pero aplicar defensas:
-  ├─ Timeout de 5 segundos en /chat
-  ├─ Reintentos exponenciales (1s, 2s, 4s) en APIs externas
-  ├─ Fallback templated si LLM falla
-  ├─ Fallback affinity 0.5 si embedding falla
-  ├─ Queue local si DB no disponible
-  └─ Respuesta parcial mejor que error
-```
-
-### Escalabilidad a Producción
-
-```
-Si crecimiento a 10,000+ usuarios:
-  ├─ Session_Manager → Redis (en lugar de en-memory)
-  ├─ Feedback_Storage → PostgreSQL con replicación
-  ├─ Scoring_Engine → caché de features pre-cargado
-  ├─ LLM calls → rate limiting, queue de trabajo
-  ├─ Frontend → CDN estático, servidor separado
-  └─ Docker → Kubernetes con auto-scaling
-```
-
----
+1. **Verificar contra el código antes de editar**, no contra el documento previo.
+2. **Fechar la verificación** en la cabecera, con la rama comprobada.
+3. **Lo no implementado va en [Diseño objetivo vs. estado real](#diseño-objetivo-vs-estado-real)**,
+   nunca en presente de indicativo en el cuerpo del documento.
+4. **Un cambio de arquitectura y su ADR entran en el mismo pull request.**
