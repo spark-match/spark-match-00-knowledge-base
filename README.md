@@ -14,6 +14,8 @@
 | 🚨 [`postmortems/`](./postmortems/) | Análisis de incidentes y aprendizaje organizacional | DevOps, leads |
 | 📋 [`templates/`](./templates/) | Plantillas reutilizables (ADR, postmortem, RFC, RFC, diseño) | Todos |
 | 🌱 [`onboarding/`](./onboarding/) | Material de bienvenida para nuevos miembros | Nuevos miembros |
+| 📐 [`docs/SDD/`](./docs/SDD/) | Documento de diseño del sistema: PRD, requisitos, diseño, arquitectura y reglas de negocio del agente | Todos |
+| 🧪 [`docs/`](./docs/) | Plan de pruebas de QA, incidencias de integración y plan de trabajo | QA, leads |
 
 📑 **Catálogo completo**: [`INDEX.md`](./INDEX.md)
 
@@ -38,6 +40,10 @@ Este repositorio está abierto a **todos los miembros de Spark Match** para comp
 > 2. **Cita fuentes** cuando tomes prestado de internet, papers u otros repos.
 > 3. **Mantén el `INDEX.md` actualizado** — es el mapa del repositorio.
 > 4. **Un documento = un tema.** Si tu doc cubre tres cosas, divídelo.
+> 5. **Verifica contra el código, no contra el documento anterior.** El SDD
+>    describió durante meses un sistema que nunca se construyó porque cada
+>    revisión partía del texto previo. `ARCHITECTURE.md` lleva la fecha de su
+>    última verificación en la cabecera; mantén esa costumbre.
 > 5. **Revisa antes de pedir review.** Ortografía, links, formato.
 
 ## 🔍 Búsqueda rápida
