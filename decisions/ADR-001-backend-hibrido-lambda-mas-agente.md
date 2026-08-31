@@ -15,7 +15,7 @@
 > **Estado actual**:
 > - El backend `spark-match-03-backend` es 100% TypeScript / Node.js.
 > - El agente cognitivo vive en un repo separado:
->   `spark-match-08-deep-agent` (Python + FastAPI + LangGraph + Bedrock).
+>   `spark-match-07-deep-agent` (Python + FastAPI + LangGraph + Bedrock).
 > - El "híbrido" se materializa a nivel de **repos**, no de un solo
 >   proceso (Lambda CRUD en un repo, FastAPI agent en otro).
 >
