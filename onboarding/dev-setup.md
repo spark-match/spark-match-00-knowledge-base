@@ -175,8 +175,7 @@ gh repo clone spark-match/spark-match-02-infrastructure
 gh repo clone spark-match/spark-match-03-backend
 gh repo clone spark-match/spark-match-04-frontend
 gh repo clone spark-match/spark-match-05-data-pipeline
-gh repo clone spark-match/spark-match-06-model-training
-gh repo clone spark-match/spark-match-07-article
+gh repo clone spark-match/spark-match-06-article
 ```
 
 ## 🔐 Configurar acceso a AWS (si aplica)
