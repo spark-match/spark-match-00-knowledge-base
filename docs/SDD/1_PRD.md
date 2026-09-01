@@ -1,4 +1,30 @@
-# CareerMatch Perú — PRD Actualizado v1.1
+# Spark Match — PRD Actualizado v1.1
+
+<!-- estado-doc:v1 -->
+> ### 📄 Documento de producto — vigente con salvedades
+>
+> **Estado:** 🟡 vigente en lo funcional · **Verificado:** 2026-09-01
+>
+> El contenido de **producto** de este PRD sigue siendo válido: el problema, los
+> objetivos, el público y el alcance del MVP no han cambiado.
+>
+> Lo que sí quedó obsoleto:
+>
+> - **El nombre.** El producto se llama **Spark Match**. «CareerMatch Perú» era el
+>   nombre anterior y ya está sustituido en todo el documento.
+> - **Las menciones técnicas.** Las referencias a proveedores de LLM (Gemini,
+>   OpenAI) y a vector stores (FAISS, Chroma, Pinecone) describen opciones que se
+>   evaluaron y no se adoptaron: el sistema usa **AWS Bedrock** y **no tiene vector
+>   store ni RAG**.
+> - **El motor de scoring.** Donde el documento hable de replantear el motor, la
+>   versión que existe está descrita en
+>   [`4_reglas-negocio-agente.md`](4_reglas-negocio-agente.md) §3: 4 factores con
+>   pesos fijos.
+>
+> **Para la arquitectura real:** [`ARCHITECTURE.md`](ARCHITECTURE.md).
+
+---
+
 
 **Versión:** 1.1  
 **Fecha:** Junio 2026  
@@ -32,7 +58,7 @@
 
 ## 1. Resumen Ejecutivo
 
-**CareerMatch Perú** es una plataforma de orientación vocacional impulsada por inteligencia artificial generativa que ayuda a estudiantes de educación secundaria y sus familias en Perú a tomar decisiones informadas sobre la elección de carrera universitaria.
+**Spark Match** es una plataforma de orientación vocacional impulsada por inteligencia artificial generativa que ayuda a estudiantes de educación secundaria y sus familias en Perú a tomar decisiones informadas sobre la elección de carrera universitaria.
 
 La plataforma utiliza un **asistente conversacional basado en LLM** que interpreta preferencias expresadas en lenguaje natural, mantiene un diálogo iterativo para capturar preferencias incompletas, y genera recomendaciones personalizadas de combinaciones carrera–universidad, sustentadas en datos oficiales del Ministerio de Educación y un **motor de evaluación multi-criterio transparente y auditable**.
 
@@ -199,9 +225,9 @@ Aunque el portal **Ponte en Carrera (MINEDU)** publica datos oficiales sobre:
 
 ### 5.1 Propuesta de Valor Diferencial
 
-A diferencia de soluciones existentes, CareerMatch Perú **integra tres componentes que no se encuentran juntos en el mercado local:**
+A diferencia de soluciones existentes, Spark Match **integra tres componentes que no se encuentran juntos en el mercado local:**
 
-| Componente | CareerMatch | Alternativas Existentes |
+| Componente | Spark Match | Alternativas Existentes |
 |---|---|---|
 | **Datos Oficiales Integrados** | Ponte en Carrera (MINEDU) actualizado automáticamente | Portales estáticos o datos no verificables |
 | **Conversación Personalizada Iterativa** | LLM que interpreta preferencias naturales y mantiene diálogo para completar información | Tests psicométricos genéricos o manuales |
@@ -719,11 +745,11 @@ Sesión almacenada completa para análisis posterior
 ### 10.1 Escenario Principal (Demo)
 
 **Persona:** Carlos, estudiante de 5º año, 17 años, usuario de prueba  
-**Contexto:** Evaluando la plataforma CareerMatch
+**Contexto:** Evaluando la plataforma Spark Match
 
 **Flujo:**
 
-1. **Acceso:** Carlos entra a `careermatch-peru.demo` desde navegador (desktop o mobile)
+1. **Acceso:** Carlos entra a `spark-match.demo` desde navegador (desktop o mobile)
 2. **Bienvenida:** Pantalla muestra propuesta y botón "Comenzar conversación"
 3. **Chat inicial:** Carlos escribe:
    > "Me gustan las matemáticas y el análisis de datos. Quiero ganar bien después de egresar, pero mi familia tiene presupuesto limitado."
@@ -782,7 +808,7 @@ Sesión almacenada completa para análisis posterior
 
 ```
 ┌─────────────────────────────────────────┐
-│  CareerMatch Perú  |  Demo v1.0         │
+│  Spark Match  |  Demo v1.0              │
 └─────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────┐
@@ -1343,7 +1369,7 @@ Detallada en PRD de Ingeniería de Prompts (documento futuro), pero incluye:
 **Ejemplo System Prompt Ilustrativo:**
 
 ```
-Eres CareerMatch, asistente de orientación vocacional para estudiantes en Perú.
+Eres Spark Match, asistente de orientación vocacional para estudiantes en Perú.
 
 Tu rol es:
 1. Interpretar intereses, restricciones y prioridades que expresa un estudiante
@@ -1659,7 +1685,7 @@ Durante la actualización de este documento, identifiqué varias oportunidades p
 
 **Beneficio:**
 - Más realista (muchos estudiantes no saben qué quieren)
-- Diferencia CareerMatch de sistemas estáticos
+- Diferencia Spark Match de sistemas estáticos
 - Demuestra sofisticación en interacción LLM
 
 ---
@@ -1812,7 +1838,7 @@ Lewis, P., Perez, E., Piktus, A., Schwenk, H., Schwettmann, D., Yih, W. T., & Ki
 
 ---
 
-**Documento Preparado Por:** Especialista en Product Requirements, en colaboración con equipo CareerMatch Perú  
+**Documento Preparado Por:** Especialista en Product Requirements, en colaboración con equipo Spark Match  
 **Fecha de Publicación:** Junio 2026  
 **Versión:** 1.1 (Actualizada)  
 **Estado:** Listo para Desarrollo  

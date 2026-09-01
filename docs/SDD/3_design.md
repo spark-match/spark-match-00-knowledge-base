@@ -1,5 +1,36 @@
 # design.md
 
+<!-- estado-doc:v1 -->
+> ### ⚠️ Documento superado
+>
+> **Estado:** 🔴 histórico · **Superado por:** [`ARCHITECTURE.md`](ARCHITECTURE.md)
+> **Verificado contra el código:** 2026-09-01
+>
+> Este documento describe el diseño **original** del sistema: un monolito FastAPI
+> con Gemini como LLM, embeddings de OpenAI/HuggingFace y un vector store
+> FAISS/Chroma/Pinecone, todo servido desde un `backend/app.py`.
+>
+> **Ese sistema no se construyó.** Lo que existe hoy es otra arquitectura, descrita
+> en `ARCHITECTURE.md`. Se conserva este documento porque registra el punto de
+> partida del diseño y las decisiones que llevaron al actual, no porque describa
+> el sistema.
+>
+> | Este documento diseñó | Lo que se construyó |
+> |---|---|
+> | Monolito FastAPI (`backend/app.py`) | Lambdas TypeScript (SAM) + agente Python en ECS Fargate |
+> | Gemini / GPT como LLM | AWS Bedrock (Claude) |
+> | Embeddings + vector store (FAISS/Chroma/Pinecone) | **Sin embeddings ni vector store**; el catálogo se consulta como CSV en memoria |
+> | `Scoring_Engine` como servicio aparte | `src/tools/recommendation/scoring.py` dentro del agente |
+> | Gate `confidence >= 0.70` | No implementado |
+> | Top-3 | Implementado (`DEFAULT_TOP_N = 3`) |
+> | SQLite / Aurora | RDS PostgreSQL (`aws_db_instance`) |
+>
+> **Para el estado real** de la arquitectura: `ARCHITECTURE.md`. **Para las reglas
+> de scoring** vigentes: [`4_reglas-negocio-agente.md`](4_reglas-negocio-agente.md).
+
+---
+
+
 ## Descripción General
 
 CareerMatch Perú es un sistema de recomendación de carreras universitarias que opera mediante un asistente conversacional basado en LLM, integrado con un motor de evaluación multi-criterio transparente y auditable. El flujo principal es: 
