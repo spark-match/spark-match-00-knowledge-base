@@ -1,5 +1,31 @@
 # Observaciones al documento tasks.md
 
+<!-- estado-doc:v1 -->
+> ### 📌 Registro de revisión — se conserva sin editar
+>
+> **Estado:** 🔵 histórico · **Verificado:** 2026-09-01
+>
+> Observaciones del equipo al documento [`tasks.md`](tasks.md), que hoy es un plan
+> histórico no ejecutado. **El texto de abajo no se modifica**: son las palabras de
+> quienes revisaron, y editarlas falsearía el registro.
+>
+> Qué pasó finalmente con las dos observaciones de correctitud:
+>
+> - **«El divisor está mal (÷18, debería ser ÷6)»** — ✅ resuelto de otra forma.
+>   `_riasec_similarity` (`spark-match-07-deep-agent`) no usa divisor fijo: normaliza
+>   contra el **auto-match del propio perfil**, que para un código bien formado vale
+>   60. Así un código degenerado con letras repetidas no puede pasar del 100 %.
+> - **«"RIA" y "AIR" dan lo mismo, se pierde el match posicional»** — ✅ resuelto.
+>   El código vigente sí pondera por posición (3-2-1), y así está documentado.
+>
+> La observación general menciona un **scoring de 5 factores** y **Aurora+pgvector**:
+> ninguno de los dos sobrevivió. El motor tiene **4 factores** y la duración se
+> excluye a propósito; la base es RDS PostgreSQL y no hay vector store. Ver
+> [`4_reglas-negocio-agente.md`](4_reglas-negocio-agente.md) §3.
+
+---
+
+
 ## Fabiola:
 
 > Nota general: el plan recoge bien lo conversado (RIASEC, scoring de 5 factores, Bedrock,
