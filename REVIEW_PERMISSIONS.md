@@ -202,8 +202,8 @@ Para los repos `01-devops`, `02-infrastructure`, `03-backend`, etc. (cuyo conten
 | `03-backend` (código) | ❌ No | Solo `@spark-match/backend-devs` + `@spark-match/ai-devs` |
 | `04-frontend` | ❌ No | Solo `@spark-match/frontend-devs` |
 | `05-data-pipeline` | ❌ No | Solo `@spark-match/devops` o team data nuevo |
-| `06-model-training` | ❌ No | Solo `@spark-match/ai-devs` |
-| `07-article` | ❌ No | Solo `@spark-match/article-authors` |
+| `06-article` | ❌ No | Solo `@spark-match/article-authors` |
+| `07-deep-agent` | ❌ No | Solo `@spark-match/ai-devs` |
 | `.github` (org profile) | ❌ No | Solo `@spark-match/owners` |
 
 **Por qué no Write general para todos**: el código de producción requiere review especializado. Un `frontend-dev` no debería mergear cambios al backend.
@@ -412,8 +412,7 @@ el admin podía hacer el merge.
 - [ ] Auditar periódicamente (mensual) los CODE OWNERS de los demás repos con:
       ```bash
       for repo in 00-knowledge-base 01-devops 02-infrastructure 03-backend \
-                  04-frontend 05-data-pipeline 06-model-training 07-article \
-                  08-deep-agent; do
+                  04-frontend 05-data-pipeline 06-article 07-deep-agent; do
         echo "=== $repo ==="
         gh api repos/spark-match/spark-match-$repo/codeowners/errors --jq '.errors | length'
       done
