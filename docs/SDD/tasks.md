@@ -1,5 +1,29 @@
 # Plan de Implementación: CareerMatch Perú — Matching Context (Scoring + Data Pipeline)
 
+<!-- estado-doc:v1 -->
+> ### ⚠️ Plan histórico, no ejecutado
+>
+> **Estado:** 🔴 histórico · **Verificado:** 2026-09-01
+>
+> Este plan se escribió para una arquitectura que se descartó: un **monorepo**
+> (`FIEECS-CareerMatch-TFP`) con el Matching Context en `contexts/matching/`,
+> scoring en una Lambda Python 3.12 y persistencia en **Aurora** con pgvector.
+>
+> El proyecto se organizó finalmente en **8 repositorios separados**, el scoring
+> vive dentro del agente (`spark-match-07-deep-agent`), y no hay Aurora ni
+> pgvector ni RAG. Ninguna de las tareas de este documento está marcada como
+> completada, y no lo estarán: el trabajo se hizo con otra estructura.
+>
+> Se conserva como registro de la planificación original. **No usarlo como
+> referencia de lo que hay que hacer ni de lo que existe.**
+>
+> **Dónde está el estado real:** [`ARCHITECTURE.md`](ARCHITECTURE.md) para la
+> arquitectura, [`4_reglas-negocio-agente.md`](4_reglas-negocio-agente.md) para el
+> scoring y el pipeline de datos.
+
+---
+
+
 ## Descripción General
 
 **Alcance de este documento: solo Matching Context (scoring determinístico en Python 3.12 Lambda) + Data Pipeline.** Los contextos Identity, Assessment, Career y AI Advisor se implementan en otros repositorios/stacks (ver `design.md` § 2.2). Este plan NO cubre el backend completo.

@@ -1,8 +1,37 @@
 # requirements.md
 
+<!-- estado-doc:v1 -->
+> ### 📄 Requisitos — vigentes; el stack, no
+>
+> **Estado:** 🟡 vigente en lo funcional · **Verificado:** 2026-09-01
+>
+> Los **requisitos funcionales** (las cláusulas EARS `THE sistema SHALL…`) siguen
+> siendo la referencia. Buena parte de ellos se redactó a propósito como
+> **agnóstica de tecnología** — «THE endpoint SHALL ser agnóstico de framework»,
+> «THE Embedding_Service y Vector_Database son agnósticos de tecnología» — y esa
+> redacción envejeció bien: la implementación real los cumple aunque no use
+> ninguna de las tecnologías que se citan como ejemplo.
+>
+> Lo que **no** hay que leer como estado actual:
+>
+> - **§ Stack Tecnológico** (tabla de dependencias: FastAPI, Uvicorn,
+>   `google-generativeai`, `openai`, `faiss-cpu`, Pinecone, Chroma). Ninguna de esas
+>   dependencias está en el sistema. Es una lista de candidatos de la época del
+>   diseño original, superada por [`ARCHITECTURE.md`](ARCHITECTURE.md).
+> - **Las variables de entorno de ejemplo** (`LLM_PROVIDER=gemini`,
+>   `VECTOR_DB_TYPE=faiss`…). No existen.
+> - **El nombre del producto.** Es **Spark Match**; «CareerMatch Perú» era el nombre
+>   anterior, ya sustituido en todo el documento.
+>
+> **RAG y embeddings:** el documento los describe como módulo *opcional*. No se
+> implementaron, y siguen siendo trabajo futuro.
+
+---
+
+
 ## Introducción
 
-CareerMatch Perú es una plataforma de orientación vocacional basada en inteligencia artificial generativa que ayuda a estudiantes de educación secundaria en Perú a tomar decisiones informadas sobre la elección de carrera universitaria. El sistema interpreta preferencias expresadas en lenguaje natural mediante un asistente conversacional, mantiene diálogos iterativos para capturar información incompleta, y genera recomendaciones personalizadas de combinaciones carrera–universidad sustentadas en datos oficiales del Ministerio de Educación. La solución proporciona transparencia y auditabilidad mediante un motor de evaluación multi-criterio desacoplado, almacena feedback de usuarios para construir una base de datos histórica de entrenamiento futuro, y permite acceso conversacional a detalles de carreras mediante un módulo RAG opcional. CareerMatch Perú es valioso porque reduce la brecha de información en orientación vocacional, es accesible en contextos de recursos limitados, mantiene datos verificables, y construye un activo estratégico (feedback histórico) que habilita modelos propios independientes a largo plazo.
+Spark Match es una plataforma de orientación vocacional basada en inteligencia artificial generativa que ayuda a estudiantes de educación secundaria en Perú a tomar decisiones informadas sobre la elección de carrera universitaria. El sistema interpreta preferencias expresadas en lenguaje natural mediante un asistente conversacional, mantiene diálogos iterativos para capturar información incompleta, y genera recomendaciones personalizadas de combinaciones carrera–universidad sustentadas en datos oficiales del Ministerio de Educación. La solución proporciona transparencia y auditabilidad mediante un motor de evaluación multi-criterio desacoplado, almacena feedback de usuarios para construir una base de datos histórica de entrenamiento futuro, y permite acceso conversacional a detalles de carreras mediante un módulo RAG opcional. Spark Match es valioso porque reduce la brecha de información en orientación vocacional, es accesible en contextos de recursos limitados, mantiene datos verificables, y construye un activo estratégico (feedback histórico) que habilita modelos propios independientes a largo plazo.
 
 ---
 
@@ -10,7 +39,7 @@ CareerMatch Perú es una plataforma de orientación vocacional basada en intelig
 
 ### Producto e Interfaz
 
-**CareerMatch Perú**  
+**Spark Match**  
 Plataforma de orientación vocacional basada en IA generativa que interpreta preferencias de estudiantes y genera recomendaciones personalizadas de carreras universitarias usando datos oficiales del MINEDU.
 
 **Web_Interface**  
@@ -738,7 +767,7 @@ Identificador criptográfico opaco que valida autenticidad y autorización de un
 
 1. THE repositorio raíz SHALL contener:
    ```
-   careermatch-peru/
+   spark-match/
    ├── README.md                       (instrucciones generales)
    ├── requirements.txt                (dependencias Python)
    ├── Dockerfile                      (containerización)
@@ -1184,4 +1213,4 @@ Los siguientes elementos están explícitamente excluidos de la versión 1 (Demo
 **Documento de Requerimientos generado**: `requirements.md` v1.0  
 **Fecha**: Junio 2026  
 **Estado**: Listo para Desarrollo  
-**Trazabilidad**: Generado desde PRD CareerMatch Perú v1.1
+**Trazabilidad**: Generado desde PRD Spark Match v1.1
