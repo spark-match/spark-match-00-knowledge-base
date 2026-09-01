@@ -47,7 +47,7 @@ Investigaciones, papers, spikes, prototipos, comparativas.
 
 | Documento | Autor | Fecha | Audiencia | Status |
 |---|---|---|---|---|
-| _(vacío — añade el primero)_ | — | — | — | — |
+| [Arquitectura del Bounded Context Notifications (RFC 2026)](./research/notifications-bounded-context-rfc.md) | @Angel | 2026-07-30 | Backend, Product, AI Devs | 🟢 |
 
 ---
 
@@ -106,6 +106,7 @@ reglas de negocio). Audiencia amplia: producto + engineering.
 ### Backend Devs
 - [ADR-001: Backend híbrido (Lambda + servidor agente)](./decisions/ADR-001-backend-hibrido-lambda-mas-agente.md)
 - [Reglas de negocio del agente y scoring](./docs/SDD/4_reglas-negocio-agente.md)
+- [RFC: Arquitectura del BC Notifications (2026)](./research/notifications-bounded-context-rfc.md) — resumen cross-team; canónico en [ADR-017 de spark-match-03-backend](https://github.com/spark-match/spark-match-03-backend/blob/dev/docs/adr/017-notifications-architecture.md)
 
 ### Frontend Devs
 - [Reglas de negocio del agente y scoring](./docs/SDD/4_reglas-negocio-agente.md)
@@ -141,12 +142,12 @@ _(se actualizará conforme se añadan docs con front-matter)_
 
 ## 📊 Estadísticas
 
-- **Documentos totales**: 13 (4 plantillas + 2 onboarding + 2 ADRs + 5 SDD)
-- **Documentos por status (governance/templates/onboarding)**:
-  - 🟢 published: 7 (4 plantillas + 2 onboarding + ADR-002)
+- **Documentos totales**: 14 (4 plantillas + 2 onboarding + 2 ADRs + 1 RFC + 5 SDD)
+- **Documentos por status (governance/templates/onboarding/research)**:
+  - 🟢 published: 8 (4 plantillas + 2 onboarding + ADR-002 + RFC Notifications)
   - 🟡 draft: 0
   - 🔴 archived: 1 (ADR-001)
 - **SDD docs** (sin status explícito en front-matter, tratados como 🟡 draft por estar en revisión): 5
   - `4_reglas-negocio-agente.md` es el único con status explícito (`draft`)
 
-> _Última actualización: 2026-07-29 (PR-#79: carpetas stub, ADR-001 archivado, ADR-002 añadido al index)_
+> _Última actualización: 2026-07-30 (RFC-001: arquitectura BC Notifications, resumen de ADR-017 en spark-match-03-backend)_
