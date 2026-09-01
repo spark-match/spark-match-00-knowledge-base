@@ -1,10 +1,15 @@
 # reglas-negocio-agente.md
 
-> **Status**: 🟡 draft 
-> **Fecha**: 2026-07-05
+> **Status**: 🟢 vigente
+> **Fecha**: 2026-07-05 · **Última verificación contra el código**: 2026-09-01
 > **Audiencia**: AI Devs, Backend, Data Engineers
 > Documento que fija el **flujo del agente** y las **reglas de negocio del scoring**, y reconcilia
 > `2_requirements.md` y `3_design.md` en los puntos donde el diseño evolucionó (ver §8).
+>
+> **Cómo mantener este documento:** las §3, §7 y §9 describen código que existe. Verificarlas
+> contra `spark-match-07-deep-agent` (no contra la versión anterior de este documento) y fechar la
+> verificación. Lo que se diseñó pero no se implementó va a la tabla de brechas de §9.2, no al
+> cuerpo del documento en presente.
 
 ---
 
@@ -33,73 +38,114 @@ El motor de recomendación **no se abandona**; se **adecúa**. En lugar de un fo
 conocimiento del proceso de orientación (qué preguntar, cómo pesar cada factor) se traslada a un
 agente. El agente:
 
-1. Conversa y **extrae** los datos necesarios para el scoring (perfil vocacional + prioridades + filtros).
-2. **Razona** cruzando esos datos con el catálogo de carreras y datos oficiales.
+1. Conversa y **extrae** los datos necesarios para el scoring (perfil vocacional + filtros).
+2. **Razona** cruzando esos datos con el catálogo real de programas y datos oficiales.
 3. Entrega un **artefacto/informe** (Top-N carreras + universidades) que el humano valida.
 
-Esto significa que el scoring de pesos dinámicos (idea de Nikolai) sigue vigente: el agente es
-quien alimenta sus variables de entrada de forma conversacional.
+> **Nota sobre los pesos.** La idea original (Nikolai) era que el agente extrajera de la
+> conversación un **peso por persona** para cada factor. La implementación actual usa **pesos
+> fijos** (§3.2) por las razones que documenta el propio código. Los pesos por persona siguen
+> siendo una dirección válida, pero hoy **no están implementados**: ver la brecha en §9.2.
 
 ---
 
 ## 3. Modelo de scoring
 
+> Fuente de verdad: `spark-match-07-deep-agent`, `src/tools/recommendation/scoring.py`.
+> `SCORING_VERSION = "1.0.0"`. La versión viaja en cada respuesta y se guarda en el informe, para
+> que un informe emitido hoy siga siendo explicable si mañana cambian los pesos.
+
 ### 3.1 Fórmula
 
 ```
-score(carrera_universidad) = w_afinidad · afinidad_norm
-                           + w_ingreso  · ingreso_norm
-                           + w_costo    · (1 − costo_norm)
-                           + w_admision · (1 − selectividad_norm)
+match_score = 0.50 · riasec_affinity
+            + 0.20 · income
+            + 0.20 · admission_accessibility
+            + 0.10 · affordability
 ```
 
-- Todas las variables normalizadas a `[0, 1]`; el score resultante ∈ `[0, 1]`.
-- **Determinismo**: mismos inputs → mismo ranking (requisito heredado de `3_design.md`).
+- Cada componente ∈ `[0, 1]`; el resultado se reporta como `match_score` ∈ `[0, 100]`
+  (`round(total * 100, 1)`).
+- **Determinismo**: mismos inputs → mismo ranking.
+- La respuesta incluye `score_breakdown` con los 4 componentes por separado, para poder explicar
+  al estudiante de dónde sale su puntuación.
 
-### 3.2 Pesos dinámicos
+**Tres reglas que hay que entender antes de tocar nada:**
 
-Los 4 pesos son **por persona**:
+1. **Los filtros no puntúan, excluyen.** Región, gestión, tipo de institución y presupuesto se
+   aplican *antes* de puntuar (§5, Bloque C). Meterlos en el score los convertiría en preferencias
+   negociables, y no lo son: quien pide Arequipa pública no debe ver Piura privada con menos
+   puntos, debe **no verla**.
+2. **Una cifra imputada no puntúa.** El pipeline rellena lo que falta con la mediana de la familia
+   de carrera, y cada fila trae su bandera `*_measured`. Si la cifra no se midió, ese componente
+   vale `NEUTRO = 0.5`: ni ayuda ni penaliza. Afecta al **73 % de los ingresos** y al **65 % de las
+   tasas de admisión**.
+3. **Los rangos de referencia son fijos, no relativos al resultado.** Se normaliza contra
+   percentiles del dataset completo, no contra el mín/máx de los candidatos filtrados. Con min-max
+   sobre el subconjunto, añadir un candidato cambiaría la nota de todos los demás y un 0.8
+   significaría algo distinto en cada búsqueda.
 
-- Cada `w ∈ [0, 1]`.
-- **Suman 1** (se normalizan tras la conversación).
-- **Pueden ser 0** (ej.: "el costo me da igual" → `w_costo = 0` y se re-normaliza el resto).
+**Rangos de referencia** (percentiles 5 y 95, calculados el 2026-08-09 sobre `programs.csv` usando
+**solo filas medidas**: 1.680 ingresos, 3.112 costos, 2.160 tasas de admisión de 6.208 filas):
 
-### 3.3 Origen de cada variable
+| Magnitud | p5 | p95 | Sentido |
+|---|---|---|---|
+| `monthly_income` | 1 598,8 | 4 195,0 | mayor = mejor |
+| `annual_cost` | 52,0 | 6 680,0 | **invertido**: menor = mejor |
+| `admission_rate` | 9,0 | 89,0 | mayor = mejor (**accesibilidad**, no selectividad) |
 
-| Variable | Qué mide | Fuente de dato |
+> Se usa p5/p95 y no mín/máx porque el máximo de `annual_cost` son S/ 32 530, un caso extremo que
+> aplastaría a todos los demás contra el cero.
+
+### 3.2 Pesos: fijos, no por persona
+
+Los pesos son **constantes del sistema** (`WEIGHTS` en `scoring.py`), iguales para todos los
+estudiantes. La afinidad domina (0.50) porque el producto es orientación **vocacional**: su
+premisa es que encajar importa más que cobrar.
+
+Cambiarlos es una decisión de producto: se edita `WEIGHTS`, se sube `SCORING_VERSION` y los
+informes antiguos siguen siendo interpretables.
+
+### 3.3 Por qué la duración NO puntúa
+
+`duration_years` **se informa pero no entra en el score**. Puntuarla exigiría decidir que menos
+años es mejor, y eso no es cierto para nadie en general: hay estudiantes para quienes una carrera
+más larga es justo lo que quieren. Se muestra como dato verificable en la tarjeta y el estudiante
+decide.
+
+> ⚠️ Esto invalida cualquier versión de este documento que hable de una **fórmula de 5 factores**
+> con `w_duracion`. No existe, y es deliberado.
+
+### 3.4 Origen de cada componente
+
+| Componente | Columna del dataset | Qué mide |
 |---|---|---|
-| `afinidad_norm` | Ajuste vocacional perfil ↔ carrera | Perfil RIASEC del estudiante × código RIASEC de la carrera |
-| `ingreso_norm` | Ingreso esperado del egresado | Ponte en Carrera (MINEDU) → `features.csv` |
-| `costo_norm` | Costo de la carrera (costo **anual** / ingreso) | Ponte en Carrera / catálogo universidad |
-| `selectividad_norm` | Qué tan difícil es entrar (tasa de admisión) | Ponte en Carrera / dato universidad |
+| `riasec_affinity` | `riasec_profile` × perfil del estudiante | Ajuste vocacional (pesos posicionales 3-2-1), llevado a `[0,1]` dividiendo entre 100 |
+| `income` | `monthly_income` + `income_measured` | Ingreso mensual del egresado (S/ / mes) |
+| `admission_accessibility` | `admission_rate` + `admission_measured` | Qué tan alcanzable es entrar (%) |
+| `affordability` | `annual_cost` + `cost_measured` | Costo anual, invertido (S/ / año) |
 
-> **Afinidad (RIASEC):** el agente ya calcula el código Holland de 3 letras del estudiante y lo
-> compara con el `riasec_profile` de cada carrera (peso posicional 3-2-1). Ver
-> `src/tools/matching.py` (`calculate_affinity`) en el POC `08-deep-agent`.
-> **Nota de implementación:** hoy `calculate_affinity` devuelve el score en **porcentaje (0–100)**;
-> para la fórmula de §3.1 hay que normalizarlo dividiendo entre 100. De los 4 términos de la
-> fórmula, **solo `afinidad` está implementado**; ver el detalle en §9.
+> **El código RIASEC de cada carrera lo asignó un modelo de lenguaje**, no el MINEDU. Sirve para
+> orientar, no como clasificación oficial, y así se declara en la herramienta.
 
 ---
 
 ## 4. Flujo conversacional del agente
 
 ```
-[Etapa 1] Exploración        → extrae PERFIL RIASEC (afinidad)
+[Etapa 1] Exploración        → extrae PERFIL RIASEC (riasec_code de 3 letras)
         │
-[Etapa 2] Prioridades        → extrae los 4 PESOS dinámicos
-        │
-[Etapa 2] Filtros            → extrae FILTROS duros (región, tipo, presupuesto)
+[Etapa 2] Filtros            → extrae FILTROS duros (región, gestión, tipo, presupuesto)
         │
         ▼
-   Motor de scoring calcula ranking (Top-N) sobre carreras que pasan los filtros
+   recommend_programs: filtra → puntúa (§3.1) → ordena → Top-N
         │
 [Etapa 3] Validación humana  → el estudiante acepta o rechaza el informe
 ```
 
-**Umbral de avance**: no se calcula ranking hasta tener los 6 scores RIASEC + al menos los 4 pesos
-(equivalente al `confidence ≥ 0.70` de `3_design.md`). Máximo **4 repreguntas** antes de forzar el
-ranking con la información disponible (degradación controlada).
+**Umbral de avance**: no se calcula ranking hasta tener los 6 scores RIASEC y el `riasec_code`.
+El gate cuantitativo `confidence ≥ 0.70` y el tope de 4 repreguntas de `3_design.md` **no están
+implementados** (§9.2).
 
 ---
 
@@ -119,136 +165,161 @@ ranking con la información disponible (degradación controlada).
 
 **Salida del bloque:** 6 scores RIASEC (1–10) + `riasec_code` (3 letras).
 
-### Bloque B — Prioridades → los 4 pesos *(Etapa 2)*
+### Bloque B — Contexto y expectativas *(Etapa 2)*
 
-| # | Pregunta guía | Alimenta |
+> ⚠️ **Este bloque ya no produce pesos.** Con pesos fijos (§3.2), las respuestas de B no entran en
+> la fórmula. Siguen siendo útiles para **conversar y explicar** el resultado, y para inferir el
+> presupuesto del Bloque C, pero el agente no debe prometer que ajustará el ranking según ellas.
+
+| # | Pregunta guía | Para qué sirve hoy |
 |---|---|---|
-| B1 | Al elegir una carrera, ordena de más a menos importante: (a) el sueldo que podrías ganar, (b) lo que cuesta estudiarla, (c) que sea lo que te apasiona, (d) qué tan fácil es entrar. | ranking base de pesos |
-| B2 | ¿Estarías dispuesto a invertir más si la carrera te asegura mejores ingresos? | relación costo ↔ ingreso |
-| B3 | ¿Qué tan importante es que te guste, aunque pague menos? | afinidad vs ingreso |
-| B4 | ¿Te animarías a una carrera muy selectiva/difícil de ingresar a la universidad/instituto, o prefieres opciones más accesibles? | tolerancia a admisión |
-| B5 | ¿Que tan importante es la duracion de la carrera? | duracion |
-
-**Salida del bloque:** `w_afinidad, w_ingreso, w_costo, w_admision` (normalizados a suma 1).
+| B1 | Al elegir una carrera, ¿qué pesa más para ti: el sueldo, lo que cuesta, que te apasione, o qué tan fácil es entrar? | Encuadrar la explicación del `score_breakdown` |
+| B2 | ¿Estarías dispuesto a invertir más si la carrera te asegura mejores ingresos? | Inferir `max_annual_cost` (filtro C4) |
+| B3 | ¿Qué tan importante es que te guste, aunque pague menos? | Contexto para el informe |
+| B4 | ¿Te animarías a una carrera muy selectiva, o prefieres opciones más accesibles? | Contexto; la accesibilidad ya pesa 0.20 |
+| B5 | ¿Qué tan importante es la duración de la carrera? | **Solo informativo** — la duración no puntúa (§3.3) |
 
 ### Bloque C — Filtros duros *(descartan opciones, no pesan)*
 
-| # | Pregunta guía | Alimenta |
-|---|---|---|
-| C1 | ¿En qué región o ciudad quieres estudiar, o te da igual? | `region` (georreferencia) |
-| C2 | ¿Universidad pública, privada o indistinto? | `tipo_gestion` |
-| C3 | ¿Universidad , instituto o indistinto? | `tipo_institucion` |
+| # | Pregunta guía | Parámetro de `recommend_programs` | Columna |
+|---|---|---|---|
+| C1 | ¿En qué región quieres estudiar, o te da igual? | `region` | `location` (departamento, 25 valores) |
+| C2 | ¿Universidad pública, privada o indistinto? | `management_type` | `management_type` |
+| C3 | ¿Universidad, instituto o indistinto? | `institution_type` | `institution_type` |
+| C4 | ¿Cuánto podrías pagar al año? | `max_annual_cost` | `annual_cost` |
+
+> **Obligatorio al filtrar:** la respuesta trae `candidates_without_each_filter` — cuántos
+> programas quedarían soltando cada filtro. Un filtro no da una respuesta mala, **borra opciones en
+> silencio**. El agente debe decir «con tu presupuesto quedan 43 de los 411 de Arequipa» siempre
+> que un filtro deje fuera a la mayoría, para que el estudiante pueda corregirlo.
 
 ---
 
-## 6. Reglas de negocio (para implementación)
+## 6. Reglas de negocio (implementadas)
 
-1. **Cálculo de pesos desde el ranking (B1):** asignar puntajes 4-3-2-1 según el orden, y dividir
-   cada uno entre la suma → pesos que suman 1.
-2. **Peso cero:** si el estudiante dice explícitamente "no me importa X", ese peso = 0 y se
-   re-normaliza el resto.
-3. **Defaults:** si no logra priorizar, usar 0.25 en cada peso.
-4. **Filtros:** los del Bloque C descartan carreras/universidades antes del scoring; si el
-   estudiante responde "me da igual", ese filtro no se aplica.
-5. **Umbral / repreguntas:** ranking solo con 6 RIASEC + 4 pesos presentes; máximo 4 repreguntas.
-6. **Desempate:** ante scores iguales (diff < 0.001), orden alfabético por institución (heredado
-   de `3_design.md`).
-7. **Salida:** Top-N (default N=5) con datos verificables (ingreso, costo, tasa de admisión) y una
-   explicación por recomendación.
+1. **Filtros primero:** los del Bloque C descartan antes del scoring. «Me da igual» / `"ambas"` /
+   `"ambos"` / `None` = sin filtro.
+2. **Filtro vacío = error explicativo:** si la combinación no deja candidatos, el error indica qué
+   filtro soltar y cuántos programas aparecerían.
+3. **Componente imputado = `NEUTRO` (0.5):** ver §3.1, regla 2.
+4. **Una recomendación por carrera:** el ranking colapsa por carrera y muestra su mejor
+   institución, para no llenar el Top-N con la misma carrera repetida.
+5. **Desempate**, en este orden:
+   1. `match_score` descendente;
+   2. **menos cifras estimadas** (lo que sabemos antes que lo que estimamos);
+   3. nombre de carrera alfabético;
+   4. institución alfabética.
+6. **Top-N:** `DEFAULT_TOP_N = 3`, `MAX_TOP_N = 10`.
+7. **Salida:** cada recomendación trae la lista `estimated` con los campos que **no** son datos
+   medidos de ese programa sino la mediana de su familia. **Deben presentarse como estimados o no
+   mencionarse.** `match_score` es una puntuación propia del sistema, no un dato del MINEDU.
 
 ---
 
-## 7. Esquema de datos requerido
+## 7. Esquema de datos
 
 ### 7.1 Campos del estudiante (perfil)
 
-Ya soportados por el POC (`StudentProfile`): 6 scores RIASEC, `riasec_code`, `interests`,
-`strengths`, `preferred_fields`, `dislikes`, identidad básica.
+Soportados por `StudentProfile` (`src/models/profile.py`): 6 scores RIASEC, `riasec_code`,
+`interests`, `strengths`, `preferred_fields`, `dislikes`, identidad básica, `target_career`,
+`career_goals`.
 
-**Faltan (añadir):** `w_afinidad`, `w_ingreso`, `w_costo`, `w_admision`, `region`,
-`tipo_gestion` (pública/privada), `tipo_institucion` (universidad/instituto),
-`presupuesto_anual` (S/. / año — el filtro de presupuesto de la UI es **anual**), `modalidad`.
+Los filtros del Bloque C **no se persisten en el perfil**: viajan como argumentos de
+`recommend_programs` en cada llamada.
 
-### 7.2 Campos por carrera/universidad → define `features.csv` (repo 05, Nikolai)
+### 7.2 Dataset de programas — `data/programs/programs.csv`
 
-El catálogo actual del POC solo tiene `riasec_profile`, `skills`, `field`, `outlook`.
-**No tiene ni un campo económico ni geográfico.** Para el scoring hacen falta:
+**Estado: ✅ existe.** 6.208 filas = carrera × institución. Fuente: Ponte en Carrera (MINEDU).
 
-| Campo | Tipo | Fuente | Uso | En la UI (Figma) |
-|---|---|---|---|---|
-| `career_id` / `career_name` | str | catálogo | id | Título de la tarjeta |
-| `institution` | str | catálogo/SUNEDU | universidad (**dato central** de cada tarjeta del reporte) | Subtítulo (ej. "U. Nacional Mayor de San Marcos") |
-| `riasec_profile` | str (3 letras) | catálogo | afinidad | "% match" |
-| `ingreso_promedio` | num (S/. / **mes**) | Ponte en Carrera | `ingreso_norm` | "Ingreso Mensual Prom." |
-| `costo_anual` | num (S/. / **año**) | Ponte en Carrera / universidad | `costo_norm` | "Costo Anual" |
-| `tasa_admision` | num (%) | Ponte en Carrera / universidad | `selectividad_norm` | "Tasa de Admisión" |
-| `region` | str | universidad / georef | filtro C1 | Filtro "Región de estudio" |
-| `tipo_gestion` | enum (pública/privada) | universidad | filtro C2 | Filtro "Tipo de universidad" |
-| `tipo_institucion` | enum (universidad/instituto) | catálogo/SUNEDU | filtro C3 | — (pendiente en UI) |
-| `duracion_anios` | num | catálogo | dato verificable | "Duración" |
+| Columna | Tipo | Uso |
+|---|---|---|
+| `source_id` | str | id de la combinación carrera–institución |
+| `career` | str | nombre de carrera — título de la tarjeta |
+| `career_family` | str | familia; base de la imputación por mediana |
+| `riasec_profile` | str (3 letras) | **fórmula** — afinidad. Asignado por LLM (repo 05) |
+| `institution` | str | universidad/instituto — subtítulo de la tarjeta |
+| `institution_type` | enum | filtro C3 |
+| `management_type` | enum | filtro C2 |
+| `location` | str (25) | filtro C1 — **departamento**, no ciudad |
+| `duration_years` | float | dato verificable — **no puntúa** (§3.3) |
+| `monthly_income` | float (S/ /mes) | **fórmula** — `income` |
+| `annual_cost` | float (S/ /año) | **fórmula** — `affordability` (invertido) + filtro C4 |
+| `admission_rate` | float (%) | **fórmula** — `admission_accessibility` |
+| `duration_measured` | bool | trazabilidad de imputación |
+| `income_measured` | bool | si es `false` → componente = `NEUTRO` |
+| `cost_measured` | bool | si es `false` → componente = `NEUTRO` |
+| `admission_measured` | bool | si es `false` → componente = `NEUTRO` |
 
-> Normalización sugerida: min-max por columna sobre el dataset → todo a `[0, 1]`.
+> **Unidades:** el ingreso es **mensual** y el costo es **anual** (así los muestra la UI); el
+> presupuesto que declara el estudiante también es **anual**, y se compara contra `annual_cost`.
 >
-> **Alineación con la UI (Figma `04-frontend`):** las columnas de arriba se validaron contra la
-> tarjeta del reporte del diseño. Ojo con las **unidades**: el ingreso es **mensual** y el costo es
-> **anual** (así los muestra la UI); el filtro de presupuesto del estudiante también es **anual**,
-> por lo que debe compararse contra `costo_anual`. `tipo_gestion` (pública/privada) y
-> `tipo_institucion` (universidad/instituto) son filtros distintos (Bloque C, C2 y C3) — no
-> confundirlos.
+> **Nomenclatura:** las columnas están en **inglés**; el resto del documento usa español por
+> legibilidad. Esta tabla es la equivalencia autoritativa.
+>
+> **Mapeo con el frontend:** `institutionType` (pública/privada) del frontend corresponde a
+> `management_type` del CSV, y `academicType` (universidad/instituto) a `institution_type`. Los
+> nombres están cruzados respecto a la intuición — verificarlo al conectar la UI.
 
 ---
 
 ## 8. Deltas respecto a `2_requirements.md` y `3_design.md`
 
-Puntos donde el diseño evolucionó y hay que reconciliar los documentos de David:
-
-| Tema | Docs SDD actuales | Dirección acordada (este doc) |
+| Tema | Docs SDD antiguos | Estado real (2026-09-01) |
 |---|---|---|
-| Modelo de perfil | Preferencias + confidence | **RIASEC** + prioridades para pesos |
-| LLM | Gemini | **Bedrock (Claude)** — *pendiente ratificar (ver ADR-001)* |
-| Vector DB | FAISS / Chroma / Pinecone | **pgvector (Aurora)** |
-| Backend | FastAPI monolito | **Híbrido: Lambda (CRUD/EDA) + servidor Python dedicado (agente)** — ver ADR-001 |
-| Georreferencia | No contemplada | DynamoDB para universidades + mapa |
+| Modelo de perfil | Preferencias + confidence | **RIASEC** (6 scores + código de 3 letras) |
+| LLM | Gemini | **AWS Bedrock (Claude)** — ver ADR-001 |
+| Vector DB | FAISS / Chroma / Pinecone | **Sin vector store.** No hay RAG implementado; el catálogo se consulta como CSV en memoria |
+| Base de datos | — | **RDS PostgreSQL** (`aws_db_instance`), no Aurora |
+| Backend | FastAPI monolito | **Híbrido**: Lambda TypeScript (CRUD/EDA) + servicio Python en ECS Fargate (agente) — ver ADR-001 |
+| Georreferencia | No contemplada | Filtro por `location` (departamento) sobre el CSV; sin mapa ni DynamoDB |
 
 ---
 
-## 9. Estado de implementación en el POC (`08-deep-agent`)
+## 9. Estado de implementación (`spark-match-07-deep-agent`)
 
-> Contraste entre las reglas de este documento y lo que **ya está codificado** en el POC
-> `08-deep-agent` (rama `main`). Sirve para no asumir que el spec = implementación.
+> Contraste entre este documento y lo que **está codificado**. Verificado el 2026-09-01 contra la
+> rama `main` del repo del agente.
 
-### 9.1 Ya implementado ✅
+### 9.1 Implementado ✅
 
-| Regla / concepto | Dónde vive en el código | Notas |
+| Regla / concepto | Dónde vive |
+|---|---|
+| Scores RIASEC 1–10 + `riasec_code` (top-3) | `src/tools/assessment.py` → `evaluate_riasec_profile` |
+| Afinidad con pesos posicionales **3-2-1**, normalizada contra el auto-match | `src/tools/matching/handler.py` → `_riasec_similarity` (devuelve 0–100) |
+| **Fórmula multicriterio de 4 factores** (§3.1) | `src/tools/recommendation/scoring.py` → `score_program` |
+| Rangos de referencia p5/p95 fijos | `scoring.py` → `REFERENCE_RANGES` |
+| Componente imputado = `NEUTRO` 0.5 | `scoring.py` → `_componente` |
+| Versionado del criterio de scoring | `scoring.py` → `SCORING_VERSION` |
+| **Filtros duros** región / gestión / tipo / presupuesto (§5-C) | `src/tools/recommendation/handler.py` → `_construir_filtros` |
+| Transparencia de filtros (`candidates_without_each_filter`) | `handler.py` |
+| Desempate por cifras medidas + alfabético (§6.5) | `handler.py` → `_orden` |
+| Top-N con tope (`3` / máx. `10`), una por carrera | `handler.py` → `DEFAULT_TOP_N`, `MAX_TOP_N` |
+| Dataset real de 6.208 programas **con RIASEC** | `data/programs/programs.csv` (etiquetado en repo 05) |
+| Marcado de cifras estimadas en la salida (`estimated`) | `handler.py` |
+
+### 9.2 Diseñado pero NO implementado ❌
+
+| Regla del documento | Estado real | Qué faltaría |
 |---|---|---|
-| Scores RIASEC 1–10 + derivación `riasec_code` (top-3) | `src/tools/assessment.py` → `evaluate_riasec_profile` | Ordena las 6 dimensiones desc. y toma las 3 mayores |
-| Afinidad con pesos posicionales **3-2-1** | `src/tools/matching.py` → `_riasec_similarity` | `weights = [3.0, 2.0, 1.0]` |
-| Cálculo del ranking Top-N por afinidad | `src/tools/matching.py` → `calculate_affinity` | `top_n=5` por defecto; ordena por score desc. |
-| Catálogo de carreras (MVP) | `src/tools/catalog.py` → `CAREER_CATALOG` (10 carreras) | Campos: `id, name, riasec_profile, description, skills, field, outlook` |
-| Búsqueda por texto/campo | `src/tools/catalog.py` → `search_careers` | Match de texto; **sin** filtros de descarte |
-| Perfil del estudiante (langmem) | `src/models/profile.py` → `StudentProfile` | 6 RIASEC, `riasec_code`, `interests`, `strengths`, `preferred_fields`, `dislikes`, identidad, `target_career`, `career_goals` |
-| Orquestación del ranking | `src/agent/subagents/matching.py` | Subagente `matching` (usa `search_careers` + `calculate_affinity`) |
+| **Pesos dinámicos por persona** (§2, §3.2) | Los pesos son constantes en `WEIGHTS` | Campos `w_*` en `StudentProfile`, extracción conversacional y paso de pesos a `score_program` |
+| Gate `confidence ≥ 0.70` y máximo 4 repreguntas (§4) | Existen `profile_completeness` y `has_riasec_profile`, pero no el umbral ni el contador | Implementar el gate en el flujo del agente |
+| Filtro por modalidad (presencial/virtual) | No existe la columna en el dataset | Añadirla en el pipeline (repo 05) antes de poder filtrar |
 
-### 9.2 Aún NO implementado (spec pendiente) ❌
+### 9.3 Decisiones cerradas (no son brechas)
 
-| Regla del documento | Estado real en el código | Qué falta |
-|---|---|---|
-| Fórmula de scoring completa (§3.1) | Solo existe el término `afinidad`; los 3 términos económicos/admisión no | Añadir `ingreso`, `costo`, `selectividad` al cálculo |
-| Pesos dinámicos por persona `w_*` (§3.2) | No hay campos ni lógica; `calculate_affinity` no recibe pesos | Campos en `StudentProfile` + extender el tool o crear servicio de scoring |
-| Escala normalizada `[0,1]` de la afinidad (§3.1) | `calculate_affinity` devuelve **% (0–100)** | Normalizar (÷100) al integrar la fórmula |
-| Filtros duros del Bloque C (§4, §6.4) | `search_careers` no descarta por `region`/`tipo`/`presupuesto` | Lógica de filtrado previa al scoring |
-| Umbral `confidence ≥ 0.70` / máx. 4 repreguntas (§4) | El modelo tiene `profile_completeness` y `has_riasec_profile`, pero no un gate 0.70 ni contador de repreguntas | Implementar el gate en el flujo del agente |
-| Desempate alfabético por institución (§6.6) | El orden es solo por score desc. | Añadir criterio de desempate |
-| `features.csv` con campos económicos/geográficos (§7.2) | No existe; el `05-data-pipeline` aún no tiene datos | Construir el dataset (repo 05) |
-
-> **Implicación:** hoy el POC entrega un ranking **puramente vocacional (RIASEC)**. Las etapas 2–3
-> (pesos, filtros, datos económicos) del flujo de §4 son diseño pendiente de implementar.
+- **La duración no puntúa** (§3.3) — deliberado, razonado en el código.
+- **El Bloque B no produce pesos** (§5-B) — consecuencia de los pesos fijos.
+- **No hay vector store ni RAG** — el catálogo cabe en memoria; el RAG es trabajo futuro.
 
 ---
 
-## 10. Preguntas abiertas para la reunión
+## 10. Preguntas abiertas
 
-1. LLM definitivo: **Bedrock vs Gemini** (impacta créditos).
-2. Fuente de datos única: **Ponte en Carrera vs SUNEDU (scraping) vs catálogo semilla**.
-3. ¿El scoring corre dentro del agente (tool `calculate_affinity` extendida) o como servicio aparte?
-4. N del Top-N para el informe final (¿3 o 5?).
+1. ¿Se recuperan los **pesos por persona** (§9.2) o se dan por descartados y se cierra el diseño
+   con pesos fijos? Es la única brecha de §9.2 que cambia el producto.
+2. ¿Se ratifica `DEFAULT_TOP_N = 3` o el informe final debe entregar 5?
+3. ¿Se añade `modalidad` al pipeline para habilitar el filtro?
+4. Los **rangos de referencia** se calcularon el 2026-08-09 sobre el dataset actual. Si el pipeline
+   vuelve a correr y cambian las distribuciones, ¿quién los recalcula y sube `SCORING_VERSION`?
+5. El portal Ponte en Carrera está **dado de baja**: la ingesta está congelada. ¿Se busca fuente
+   alternativa o se declara el dataset como corte fijo del proyecto?
