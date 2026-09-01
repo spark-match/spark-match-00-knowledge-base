@@ -23,15 +23,15 @@ Construimos un **copiloto de orientación vocacional** basado en IA Generativa q
 
 | Repo | Para qué |
 |---|---|
-| [spark-match/.github](https://github.com/spark-match/.github) | Perfil de la organización + info general |
-| [spark-match/00-knowledge-base](https://github.com/spark-match/00-knowledge-base) | **Este repo** — base de conocimiento compartida |
-| [spark-match/01-devops](https://github.com/spark-match/01-devops) | Workflows reutilizables (CI/CD) |
-| [spark-match/02-infrastructure](https://github.com/spark-match/02-infrastructure) | Terraform de AWS |
-| [spark-match/03-backend](https://github.com/spark-match/03-backend) | Backend serverless (Lambda + EventBridge) |
-| [spark-match/04-frontend](https://github.com/spark-match/04-frontend) | SPA en Angular |
-| [spark-match/05-data-pipeline](https://github.com/spark-match/05-data-pipeline) | ETL de datos vocacionales |
-| [spark-match/06-model-training](https://github.com/spark-match/06-model-training) | Entrenamiento y serving de modelos |
-| [spark-match/07-article](https://github.com/spark-match/07-article) | Artículo académico LaTeX |
+| [.github](https://github.com/spark-match/.github) | Perfil de la organización + info general |
+| [spark-match-00-knowledge-base](https://github.com/spark-match/spark-match-00-knowledge-base) | **Este repo** — base de conocimiento compartida |
+| [spark-match-01-devops](https://github.com/spark-match/spark-match-01-devops) | Workflows reutilizables (CI/CD) |
+| [spark-match-02-infrastructure](https://github.com/spark-match/spark-match-02-infrastructure) | Terraform de AWS |
+| [spark-match-03-backend](https://github.com/spark-match/spark-match-03-backend) | Backend serverless (Lambda + EventBridge) |
+| [spark-match-04-frontend](https://github.com/spark-match/spark-match-04-frontend) | SPA en Angular |
+| [spark-match-05-data-pipeline](https://github.com/spark-match/spark-match-05-data-pipeline) | ETL de datos vocacionales |
+| [spark-match-06-article](https://github.com/spark-match/spark-match-06-article) | Artículo académico LaTeX |
+| [spark-match-07-deep-agent](https://github.com/spark-match/spark-match-07-deep-agent) | Agente cognitivo (LangGraph + Bedrock) |
 
 ### Equipos
 

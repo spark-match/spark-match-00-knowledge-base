@@ -90,7 +90,7 @@ Hay que fijar **un solo N** y que ambos lados lo respeten.
 
 El dataset económico (6.208 filas) no trae la dimensión vocacional, así que el término `afinidad`
 de la fórmula de scoring **no se puede calcular** sobre los datos reales. Hoy la afinidad solo
-existe sobre las 10 carreras hardcodeadas del POC `08-deep-agent`.
+existe sobre las 10 carreras hardcodeadas del POC `07-deep-agent`.
 
 - **En curso**: PR `feature/riasec-tagging` en `05-data-pipeline` — etiqueta las 554 carreras
   únicas vía Bedrock y hace el join a las 6.208 filas.
@@ -147,7 +147,7 @@ corte del `raw.xlsx`. Es una afirmación pública sobre datos oficiales.
 
 **Escala de afinidad: 0–100 en el agente vs [0,1] en la fórmula** · Agente ↔ Scoring · 🟢 Resuelto
 
-El tool `calculate_affinity` del agente (`08-deep-agent`, `src/tools/matching.py`) devuelve la
+El tool `calculate_affinity` del agente (`07-deep-agent`, `src/tools/matching/handler.py`) devuelve la
 afinidad en **porcentaje (0–100)** — el `reason` dice literalmente *"{score}% de afinidad"*. La
 fórmula de scoring de 5 factores (`4_reglas-negocio-agente.md` §3.1) trabaja con todas las variables
 en **[0, 1]**.
@@ -162,7 +162,7 @@ score queda **inflado ×100** respecto a los demás factores y el ranking se dis
   final** (que aún no está definido). @Nikolai revisará los repos para ubicar dónde cae el 0–100 y
   quién lo corrige al cerrar el prompt.
 - **✅ Resuelto (PR #19, mergeado a main):** @Nikolai corrigió `_riasec_similarity` en
-  `08-deep-agent/src/tools/matching.py` para devolver `round(score / max_possible, 4)` (rango
+  `07-deep-agent/src/tools/matching/handler.py` para devolver `round(score / max_possible, 4)` (rango
   **[0,1]**) en vez de `* 100`; el `reason` ya no muestra el `%`. La afinidad ahora es consistente
   con la fórmula de scoring. Verificado en QA (punto I-6 del [plan de pruebas](QA_TEST_PLAN.md)).
 
